@@ -1,0 +1,53 @@
+{
+  "description": "Distances and routing from one offline run on four archived camera images. This is not an accuracy or latency benchmark.",
+  "run": {
+    "threshold": 0.1,
+    "clip_model": "openai/clip-vit-base-patch32",
+    "clip_revision": "aa8b329a670ccfc2a5170d7391ac3fca2e88595f",
+    "segmentation": "MediaPipe Selfie Segmentation",
+    "vlm_enabled": false,
+    "input_count": 4
+  },
+  "samples": [
+    {
+      "sample": 0,
+      "source_image": "frame_20250710_174952.jpg",
+      "baseline": true,
+      "selected_region": null,
+      "cosine_distances": {}
+    },
+    {
+      "sample": 1,
+      "source_image": "frame_20250710_175041.jpg",
+      "baseline": false,
+      "selected_region": "person",
+      "cosine_distances": {
+        "full": 0.030704113581296988,
+        "person": 0.18922038687644394,
+        "background": 0.09279552609991648
+      }
+    },
+    {
+      "sample": 2,
+      "source_image": "frame_20250710_175709.jpg",
+      "baseline": false,
+      "selected_region": "full",
+      "cosine_distances": {
+        "full": 0.07722249058181019,
+        "person": 0.22678589794421078,
+        "background": 0.15320977777281652
+      }
+    },
+    {
+      "sample": 3,
+      "source_image": "frame_20250710_175924.jpg",
+      "baseline": false,
+      "selected_region": "full",
+      "cosine_distances": {
+        "full": 0.04355959311040447,
+        "person": 0.1714549397353382,
+        "background": 0.1368373453863423
+      }
+    }
+  ]
+}
