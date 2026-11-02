@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "event-triggered-vision"
+version = "0.1.0"
+description = "Experimental region-aware CLIP change detection and optional VLM calls"
+requires-python = ">=3.10,<3.13"
+dependencies = ["numpy>=1.24,<2", "Pillow>=10,<12"]
+
+[project.optional-dependencies]
+models = ["torch>=2.2,<3", "torchvision>=0.17,<1", "transformers>=4.45,<4.49", "opencv-contrib-python>=4.9,<4.12", "mediapipe==0.10.21"]
+
+[project.scripts]
+vision-events = "vision_events.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
