@@ -29,7 +29,7 @@ flowchart TB
 Each sampled frame is encoded as a full image, a person-only image, and a background-only image. Masked pixels are black. The gate compares each region embedding with its stored reference using cosine distance:
 
 $$
-d_r = 1 - \frac{e_r \cdot e_r^{\mathrm{ref}}}{\lVert e_r \rVert\,\lVert e_r^{\mathrm{ref}} \rVert}
+d_r = 1 - \frac{e_r \cdot e_r^{\mathrm{ref}}}{\lVert e_r \rVert \cdot \lVert e_r^{\mathrm{ref}} \rVert}
 $$
 
 The first sample sets the references. Person and background distances determine the route when they are greater than a threshold; the full-frame distance is reported for context.
