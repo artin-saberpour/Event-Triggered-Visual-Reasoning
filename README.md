@@ -6,25 +6,11 @@ For interactive perception, sending every camera frame to a large vision-languag
 
 `Vision-language models` · `CLIP` · `MediaPipe` · `LLaVA` · `Change detection`
 
-![Six-sample synthetic demonstration of person and background cosine distances and selected routes.](docs/images/synthetic-gate-routing.png)
-
-*Output of the included `--simulate` demo using artificial vectors. This visual illustrates the gate's logic; it is not a camera recording, model inference result, or benchmark.*
-
-In this example, sample 0 initializes the reference. A person-only change triggers at sample 2, while simultaneous person and background changes select the full frame at sample 4. Repeating the same embeddings does not trigger another event.
-
 ## Pipeline
 
-```mermaid
-flowchart TB
-    A["Camera or video frame"] --> B["MediaPipe person mask"]
-    B --> C["Person and background views"]
-    A --> D["CLIP embeddings"]
-    C --> D
-    D --> E["Cosine-distance gate"]
-    E --> F["No event"]
-    E --> G["Person, background, or full frame"]
-    G --> H["Optional LLaVA description"]
-```
+**Frame → person/background segmentation → CLIP embeddings → change gate → selected view → optional LLaVA**
+
+If neither region crosses the change threshold, the gate emits no event.
 
 Each sampled frame is encoded as a full image, a person-only image, and a background-only image. Masked pixels are black. The gate compares each region embedding with its stored reference using cosine distance:
 
@@ -57,6 +43,18 @@ python -m unittest discover -s tests -v
 ```
 
 On macOS or Linux, activate with `source .venv/bin/activate` instead. Each line of the demo is a JSON record containing the selected region and synthetic distances.
+
+## Create a report from real captures
+
+The optional capture-report script processes a folder of JPG or PNG images in filename order. It saves each original frame, its person and background views, the actual CLIP cosine distances, and the gate's selected region. The resulting `report.html` displays those views beside their corresponding values; `events.jsonl` and `run.json` retain the machine-readable output. The script uses the current implementation and does not run LLaVA.
+
+After installing the model dependencies described below, run:
+
+```powershell
+python scripts\record_captures.py --frames path\to\captures --output outputs\capture-report --device cuda
+```
+
+Choose a new output path for each run. Images and results stay local unless you choose to share them. The script has automated tests with a fake model; real-model execution is not yet verified. No previously recorded camera traces or performance measurements are included in this repository.
 
 ## Try a camera or video
 
