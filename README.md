@@ -73,7 +73,7 @@ To generate descriptions for selected images, add `--vlm`:
 vision-events --source 0 --device cuda --every 30 --max-samples 100 --vlm --question "Describe what is visible in this image."
 ```
 
-The first run downloads the required weights. The optional 7B LLaVA model requires substantial memory and disk space. The default cosine-distance threshold is `0.1`; tune it with `--threshold` for the scene and task. The program does not save camera frames by default.
+The first run downloads the required weights. CLIP uses a [pinned Hugging Face conversion-bot revision](https://huggingface.co/openai/clip-vit-base-patch32/commit/aa8b329a670ccfc2a5170d7391ac3fca2e88595f) containing `safetensors` weights. This is an unmerged conversion of the original model; it avoids loading the default branch's legacy PyTorch `.bin` checkpoint. The optional 7B LLaVA model requires substantial memory and disk space. The default cosine-distance threshold is `0.1`; tune it with `--threshold` for the scene and task. The program does not save camera frames by default.
 
 ## Scope and validation
 

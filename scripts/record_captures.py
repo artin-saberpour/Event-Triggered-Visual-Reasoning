@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from vision_events.gate import RegionGate
+from vision_events.models import CLIP_MODEL_ID, CLIP_SAFE_REVISION
 
 
 def record_frames(paths, model, gate: RegionGate, output: Path) -> list[dict]:
@@ -50,7 +51,8 @@ def record_frames(paths, model, gate: RegionGate, output: Path) -> list[dict]:
             records.append(record)
     (output / "run.json").write_text(json.dumps({
         "threshold": gate.threshold,
-        "clip_model": "openai/clip-vit-base-patch32",
+        "clip_model": CLIP_MODEL_ID,
+        "clip_revision": CLIP_SAFE_REVISION,
         "segmentation": "MediaPipe Selfie Segmentation",
         "vlm_enabled": False,
         "input_count": len(records),

@@ -45,7 +45,9 @@ class CaptureReportTests(unittest.TestCase):
                 for image_path in record["images"].values():
                     self.assertTrue((output / image_path).is_file())
             self.assertIn("frame_1.png", (output / "report.html").read_text())
-            self.assertFalse(json.loads((output / "run.json").read_text())["vlm_enabled"])
+            manifest = json.loads((output / "run.json").read_text())
+            self.assertFalse(manifest["vlm_enabled"])
+            self.assertEqual(manifest["clip_revision"], recorder.CLIP_SAFE_REVISION)
 
     def test_does_not_overwrite_existing_output(self):
         with tempfile.TemporaryDirectory() as temp:

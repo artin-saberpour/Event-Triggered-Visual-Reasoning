@@ -5,6 +5,11 @@ from __future__ import annotations
 import numpy as np
 from PIL import Image
 
+CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
+# Pinned Hugging Face conversion-bot revision with a safetensors checkpoint.
+# The checkpoint on the model's default branch is in the legacy .bin format.
+CLIP_SAFE_REVISION = "aa8b329a670ccfc2a5170d7391ac3fca2e88595f"
+
 
 class VisionModels:
     def __init__(self, device: str = "auto", use_vlm: bool = False) -> None:
@@ -20,8 +25,10 @@ class VisionModels:
         self.cv2, self.torch = cv2, torch
         self.device = "cuda" if device != "cpu" and torch.cuda.is_available() else "cpu"
         self.segmenter = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
-        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-        self.clip = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device).eval()
+        self.clip_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_ID, revision=CLIP_SAFE_REVISION)
+        self.clip = CLIPModel.from_pretrained(
+            CLIP_MODEL_ID, revision=CLIP_SAFE_REVISION, use_safetensors=True
+        ).to(self.device).eval()
         self.vlm = self.vlm_processor = None
         if use_vlm:
             from transformers import AutoProcessor, LlavaForConditionalGeneration
