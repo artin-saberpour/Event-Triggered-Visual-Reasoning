@@ -75,7 +75,7 @@ After installing the model dependencies described below, run:
 python scripts\record_captures.py --frames path\to\captures --output outputs\capture-report --device cuda
 ```
 
-Choose a new output path for each run. Images and results stay local unless you choose to share them. In addition to automated tests with a fake model, the capture-report path was run on the four real images shown above.
+Choose a new output path for each run. Images and results stay local unless you choose to share them. In addition to automated tests with a fake model, the capture-report path was run on four real desk images; one sample is shown above.
 
 ## Try a camera or video
 
