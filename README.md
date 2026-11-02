@@ -1,23 +1,51 @@
-# Event-triggered vision with region-aware change detection
+# Event-Triggered Visual Reasoning
 
-An exploratory prototype that uses person/background segmentation and CLIP image embeddings to decide when an image region has changed enough to warrant further inspection. An optional LLaVA adapter can describe the selected region when a change is detected.
+**Use changes in the person and background to select when, and what, a vision-language model should inspect.**
 
-This repository is an **AI-assisted reconstruction and refactoring of exploratory research scripts** from the author's archive. It is separate from the final method of the associated research paper. MediaPipe, CLIP and LLaVA are pretrained third-party components, not models trained for this project.
+For interactive perception, sending every camera frame to a large vision-language model can be unnecessary. This exploratory prototype uses person segmentation and CLIP image embeddings to detect changes in different scene regions, then optionally routes the selected image to LLaVA.
 
-## How it works
+`Vision-language models` · `CLIP` · `MediaPipe` · `LLaVA` · `Change detection`
 
-1. MediaPipe separates a sampled frame into person-only and background-only images; masked pixels are black.
-2. CLIP encodes the full frame and both regions. The first sample establishes reference embeddings.
-3. The gate measures cosine distance from the previous reference for each region. A person-only change selects the person image, a background-only change selects the background, and simultaneous changes select the full frame.
-4. If `--vlm` is enabled, the selected image is sent to local LLaVA for a response. Otherwise, the program only reports the gate decisions.
+![Six-sample synthetic demonstration of person and background cosine distances and selected routes.](docs/images/synthetic-gate-routing.png)
 
-The full-frame distance is reported for context; the two region distances determine routing. A region reference is updated after its event. For a full-frame event, both region references are refreshed, correcting a repeated-trigger issue in the archived script. The default distance threshold is a starting point, not a validated operating point.
+*Output of the included `--simulate` demo using artificial vectors. This visual illustrates the gate's logic; it is not a camera recording, model inference result, or benchmark.*
 
-**Validation status:** the model-independent gate and its synthetic demo pass tests. The cleaned camera/video, model-download and VLM paths have not yet been run end to end in the current environment. No latency, call-reduction, accuracy or deployment claims are made. MediaPipe segmentation, blacked-out regions, scene lighting and threshold choice can affect events; LLaVA output may be incorrect.
+In this example, sample 0 initializes the reference. A person-only change triggers at sample 2, while simultaneous person and background changes select the full frame at sample 4. Repeating the same embeddings does not trigger another event.
 
-## Run the synthetic demo
+## Pipeline
 
-Python 3.10 or 3.11 is recommended. In PowerShell:
+```mermaid
+flowchart TB
+    A["Camera or video frame"] --> B["MediaPipe person mask"]
+    B --> C["Person and background views"]
+    A --> D["CLIP embeddings"]
+    C --> D
+    D --> E["Cosine-distance gate"]
+    E --> F["No event"]
+    E --> G["Person, background, or full frame"]
+    G --> H["Optional LLaVA description"]
+```
+
+Each sampled frame is encoded as a full image, a person-only image, and a background-only image. Masked pixels are black. The gate compares each region embedding with its stored reference using cosine distance:
+
+$$
+d_r = 1 - \frac{e_r \cdot e_r^{\mathrm{ref}}}{\lVert e_r \rVert\,\lVert e_r^{\mathrm{ref}} \rVert}
+$$
+
+The first sample sets the references. Person and background distances determine the route when they are greater than a threshold; the full-frame distance is reported for context.
+
+| Person changed | Background changed | Selected input |
+| --- | --- | --- |
+| No | No | No event |
+| Yes | No | Person view |
+| No | Yes | Background view |
+| Yes | Yes | Full frame |
+
+After an event, the affected region reference is updated. A full-frame event refreshes both region references, preventing repeated triggers on unchanged inputs. LLaVA is called only if `--vlm` is enabled and an event is selected. It receives the **current selected image**, not a before-and-after pair, so its response does not directly compare frames.
+
+## Try the synthetic demo
+
+The gate and its tests run without downloading models. Python 3.10 or 3.11 is recommended.
 
 ```powershell
 py -3.11 -m venv .venv
@@ -28,34 +56,35 @@ vision-events --simulate
 python -m unittest discover -s tests -v
 ```
 
-On macOS or Linux, activate with `source .venv/bin/activate`. The synthetic output is a deterministic illustration of routing using artificial vectors; it is not a model prediction or benchmark.
+On macOS or Linux, activate with `source .venv/bin/activate` instead. Each line of the demo is a JSON record containing the selected region and synthetic distances.
 
-## Run on a camera or video
+## Try a camera or video
 
-Install the optional model dependencies. For CUDA, first install the matching PyTorch and torchvision builds using the [official PyTorch selector](https://pytorch.org/get-started/locally/). The first run downloads model weights from Hugging Face and needs network access and disk space.
+For CUDA, first install compatible PyTorch and torchvision builds using the [official PyTorch selector](https://pytorch.org/get-started/locally/), then install the optional dependencies:
 
 ```powershell
 python -m pip install -e ".[models]"
 vision-events --source 0 --device cuda --every 30 --max-samples 100
 ```
 
-`--source 0` selects the first camera; a local video path can be used instead. `--every 30` analyzes every 30th frame, not one frame per fixed wall-clock interval. The program prints one JSON object per analyzed frame, with a baseline flag, region distances and selected region. `null` means no event. Stop an unlimited run with Ctrl+C. Use `--device cpu` for CPU execution; inference can be slow.
+Use a local video path instead of `0` to process a recording. `--every 30` analyzes every 30th frame; it is not a fixed wall-clock interval. Each analyzed sample produces a JSON record. Omit `--max-samples` for an unlimited run and stop with Ctrl+C. Use `--device cpu` if CUDA is unavailable.
 
-To additionally load LLaVA and generate a response for each event:
+To generate descriptions for selected images, add `--vlm`:
 
 ```powershell
-vision-events --source 0 --device cuda --every 30 --max-samples 100 --vlm --question "What changed in the visible scene?"
+vision-events --source 0 --device cuda --every 30 --max-samples 100 --vlm --question "Describe what is visible in this image."
 ```
 
-LLaVA receives only the selected current image, not the previous frame. Its answer describes or reasons about what is visible; it cannot directly compare the two frames. The 7B model needs substantial GPU memory and disk space; CPU execution needs much more system memory and may be impractical. The exact memory requirement depends on the environment. Omit `--vlm` for the lighter gate-only experiment.
+The first run downloads the required weights. The optional 7B LLaVA model requires substantial memory and disk space. The default cosine-distance threshold is `0.1`; tune it with `--threshold` for the scene and task. The program does not save camera frames by default.
 
-Tune `--threshold` from 0 to 2 for cosine distance (default 0.1). Frame sampling and threshold should be assessed for the intended scene and task; this prototype has no calibrated defaults. The program does not save camera frames by default.
+## Scope and validation
 
-## Credits
+- **What has been checked:** the model-independent gate is tested with synthetic vectors, including separate and simultaneous changes and reference updates.
+- **What remains to be checked:** the refactored camera/video and real-model paths have not been verified end to end here. Latency, model-call reduction, missed events, and accuracy have not been measured.
+- **Research context:** this is an AI-assisted reconstruction and refactoring of exploratory scripts, separate from the final method of the associated paper. Thresholds, segmentation quality, lighting, occlusion, and VLM errors can affect the behavior.
 
-- [MediaPipe Selfie Segmentation](https://github.com/google-ai-edge/mediapipe) for the person mask.
-- [CLIP](https://github.com/openai/CLIP), via [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32), for image embeddings.
-- [LLaVA](https://github.com/haotian-liu/LLaVA), via [`llava-hf/llava-1.5-7b-hf`](https://huggingface.co/llava-hf/llava-1.5-7b-hf), for optional image descriptions.
-- The model interfaces use [Hugging Face Transformers](https://huggingface.co/docs/transformers/).
+A useful next evaluation would compare event-triggered routing with regular inference on the same recorded scenes, measuring missed events, response delay, and model calls. [See the project overview](https://artin-saberpour.github.io/projects/event-triggered-vision/).
 
-Review upstream code, model and dataset licenses before reuse.
+## Models and acknowledgments
+
+This project uses pretrained third-party components: [MediaPipe Selfie Segmentation](https://github.com/google-ai-edge/mediapipe), [CLIP](https://github.com/openai/CLIP) via [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32), and optional [LLaVA](https://github.com/haotian-liu/LLaVA) via [`llava-hf/llava-1.5-7b-hf`](https://huggingface.co/llava-hf/llava-1.5-7b-hf). Model interfaces use [Hugging Face Transformers](https://huggingface.co/docs/transformers/). Review upstream code, model, and data licenses before reuse.
