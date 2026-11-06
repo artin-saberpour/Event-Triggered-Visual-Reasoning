@@ -103,6 +103,44 @@ python scripts\record_captures.py --frames path\to\captures --output outputs\cap
 
 Choose a new output path for each run. Images and results stay local unless you choose to share them. In addition to automated tests with a fake model, the capture-report path was run on four real desk images; one sample is shown above.
 
+## Live task-change demo
+
+This webcam demo shows the live camera and open-ended descriptions of the person's visible activity. It can reuse a description from a session-local CLIP memory when a later frame appears to match it; otherwise it calls LLaVA. There is no fixed list of activities. Cached descriptions are prior model outputs, not verified labels.
+
+With the model dependencies installed as described below, start from the repository root:
+
+```powershell
+python -m vision_events.task_demo --camera 0 --device cuda --log outputs\task-demo\events.jsonl
+```
+
+The first run downloads CLIP and LLaVA weights. LLaVA 1.5 7B needs substantial disk space and GPU memory; `--device cpu` is available but may be very slow. Use `--camera 1` if a different webcam is needed. Press **Q** or **Esc** to quit. The optional JSONL log contains gate decisions, cache scores, sources, timing and actual VLM responses, but no images. It must be a new path, so change the filename for each run.
+
+For a screen recording, try a full-screen dashboard and request a sharper camera feed:
+
+```powershell
+python -m vision_events.task_demo --camera 0 --device cuda --sample-seconds 0.5 --fullscreen --camera-resolution 1280x720
+```
+
+The dashboard is drawn at 1920x1080. A 1920x1080 display and recording output can avoid extra resizing; other display sizes may scale it. The webcam may not support the requested size, so the console reports the actual frame dimensions after the models load. A different capture size can also change camera framing, speed and model results. Use the recording software's high-quality 1080p setting and check a short sample before recording the full demo.
+
+Place the webcam so the person's face, hands, and relevant objects are visible together. After the first observation, try holding a cup, using a keyboard, or holding a phone. Keep each action visible for a few seconds; once at least two different descriptions have been stored, return to an earlier activity and watch for `REUSED FROM MEMORY`.
+
+The baseline always calls LLaVA. After a visual trigger, the demo compares the full-frame CLIP embedding with the stored text embeddings. It reuses the best description only when there are at least two distinct candidates, the best cosine similarity is at least `--min-similarity` (default `0.30`), and the gap to the second is at least `--min-margin` (default `0.04`). Otherwise LLaVA describes the full frame, and its nonempty response is added to memory unless it contains certain explicit uncertainty phrases. Memory exists only for the current process; it starts empty on the next run.
+
+The similarity and margin defaults are **unvalidated starting points**, not calibrated confidence scores. A novel activity can still be matched incorrectly; the simple uncertainty-phrase filter can also miss uncertain responses. The main view shows the live scene, current context, recent observations and three model panels: MediaPipe person/background views, CLIP change and memory scores, and LLaVA calls and cache reuse. The mask previews come from the latest processed frame, whose timestamp is shown; they can lag the live camera while inference is running. The previews stay in memory and are not saved to the log. Press **D** to replace the history with expanded cache details, and **D** again to return. Resolution time is wall-clock time after the gate, not end-to-end camera-to-display latency. Inference runs in the background and replaces queued stale frames when it cannot keep up. To share the demo, record the dashboard with a screen recorder.
+
+The full-width CLIP chart plots the person and background **cosine distances to their stored region references** over the latest 30 seconds, using up to 240 processed samples. The dashed horizontal line is the gate threshold; a ring marks a region that triggered an event. When the reference is refreshed, a dashed vertical drop shows the exact zero distance of that frame to its new reference; it is a derived reset, not an additional sampled frame. The next observation is connected from that zero. The first frame establishes the references and has no distance point. The actual sample values are not smoothed. Time is when the image was captured; gaps over four seconds are not connected, and the plot can pause while a VLM call runs. The vertical range adjusts to the visible values and the threshold. A visual trigger does not by itself establish a change in activity.
+
+For a denser trace, try `--sample-seconds 0.5`. This requests more frequent processing, which can increase computation, change trigger timing and replace more queued frames if inference cannot keep up.
+
+For a comparison that calls LLaVA for every triggered event, start a separate run with:
+
+```powershell
+python -m vision_events.task_demo --camera 0 --device cuda --mode vlm
+```
+
+This is a single-image prototype, not verified action recognition. The VLM has no audio or video memory and cannot tell what someone says or verify a message was sent. Texting may be indistinguishable from other phone use in a still frame. A model can be wrong, the segmentation or gate can miss a change, and an old description may remain visible after the scene changes. If the trigger count does not increase during a change, try a lower threshold such as `--threshold 0.05`; this may cause more triggers and VLM calls. Compare the hybrid with `--mode vlm` and check the real outputs before presenting it.
+
 ## Try a camera or video
 
 For CUDA, first install compatible PyTorch and torchvision builds using the [official PyTorch selector](https://pytorch.org/get-started/locally/), then install the optional dependencies:
@@ -133,3 +171,5 @@ A useful next evaluation would compare event-triggered routing with regular infe
 ## Models and acknowledgments
 
 This project uses pretrained third-party components: [MediaPipe Selfie Segmentation](https://github.com/google-ai-edge/mediapipe), [CLIP](https://github.com/openai/CLIP) via [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32), and optional [LLaVA](https://github.com/haotian-liu/LLaVA) via [`llava-hf/llava-1.5-7b-hf`](https://huggingface.co/llava-hf/llava-1.5-7b-hf). Model interfaces use [Hugging Face Transformers](https://huggingface.co/docs/transformers/). Review upstream code, model, and data licenses before reuse.
+
+

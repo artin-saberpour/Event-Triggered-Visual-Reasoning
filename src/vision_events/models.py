@@ -53,6 +53,16 @@ class VisionModels:
             features = self.clip.get_image_features(**inputs).float().cpu().numpy()
         return images, dict(zip(images, features))
 
+    def encode_texts(self, descriptions: list[str]) -> np.ndarray:
+        """Encode descriptions in the same CLIP space as frame embeddings."""
+        if not descriptions:
+            raise ValueError("At least one description is required")
+        inputs = self.clip_processor(
+            text=descriptions, padding=True, truncation=True, return_tensors="pt"
+        ).to(self.device)
+        with self.torch.inference_mode():
+            return self.clip.get_text_features(**inputs).float().cpu().numpy()
+
     def describe(self, image: Image.Image, question: str, max_new_tokens: int = 80) -> str:
         if self.vlm is None or self.vlm_processor is None:
             raise RuntimeError("The VLM was not enabled")
@@ -70,3 +80,4 @@ class VisionModels:
 
     def close(self) -> None:
         self.segmenter.close()
+

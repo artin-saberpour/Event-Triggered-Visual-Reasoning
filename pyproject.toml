@@ -14,6 +14,8 @@ models = ["torch>=2.2,<3", "torchvision>=0.17,<1", "transformers>=4.45,<4.49", "
 
 [project.scripts]
 vision-events = "vision_events.cli:main"
+vision-task-demo = "vision_events.task_demo:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
