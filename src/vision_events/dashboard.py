@@ -3,18 +3,35 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 
-def wrap_display_text(cv2: Any, value: str, max_width: int, scale: float, max_lines: int) -> list[str]:
+# OpenCV uses BGR; these muted ink colors are shared by the chart and its key.
+PAPER = (237, 240, 242)
+PANEL = (247, 249, 249)
+INK = (43, 43, 36)
+MUTED = (103, 104, 94)
+RULE = (192, 196, 190)
+PERSON = (121, 85, 42)
+BACKGROUND = (58, 81, 157)
+RESET = (128, 131, 125)
+
+
+def wrap_display_text(cv2: Any, value: str, max_width: int, scale: float, max_lines: int,
+                      *, measure: Callable[[str], float] | None = None) -> list[str]:
     """Wrap text to the panel width; the complete response stays in the log."""
     value = " ".join(value.split()).encode("ascii", "replace").decode("ascii")
     font = cv2.FONT_HERSHEY_SIMPLEX
 
     def fits(text: str) -> bool:
-        return cv2.getTextSize(text, font, scale, 1)[0][0] <= max_width
+        width = measure(text) if measure else cv2.getTextSize(text, font, scale, 1)[0][0]
+        return width <= max_width
 
     lines: list[str] = []
     line = ""
@@ -44,15 +61,42 @@ def wrap_display_text(cv2: Any, value: str, max_width: int, scale: float, max_li
     return lines
 
 
-def _rounded_box(cv2: Any, canvas: np.ndarray, x: int, y: int, width: int, height: int,
-                 color: tuple[int, int, int], radius: int = 12) -> None:
-    """Fill a rounded rectangle using only OpenCV drawing primitives."""
-    right, bottom = x + width - 1, y + height - 1
-    cv2.rectangle(canvas, (x + radius, y), (right - radius, bottom), color, -1)
-    cv2.rectangle(canvas, (x, y + radius), (right, bottom - radius), color, -1)
-    for cx, cy in ((x + radius, y + radius), (right - radius, y + radius),
-                   (x + radius, bottom - radius), (right - radius, bottom - radius)):
-        cv2.circle(canvas, (cx, cy), radius, color, -1, cv2.LINE_AA)
+@lru_cache(maxsize=32)
+def _label_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    """Use the system UI font where possible, with portable fallbacks."""
+    windows_fonts = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    candidates = [
+        windows_fonts / ("segoeuib.ttf" if bold else "segoeui.ttf"),
+        Path("/System/Library/Fonts/Supplemental") / ("Arial Bold.ttf" if bold else "Arial.ttf"),
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        "arialbd.ttf" if bold else "arial.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(str(candidate), size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
+
+
+@lru_cache(maxsize=1024)
+def _label_mask(value: str, size: int, bold: bool) -> tuple[Image.Image, int, int]:
+    """Cache antialiased label masks so static text is not rasterized every frame."""
+    font = _label_font(size, bold)
+    left, top, right, bottom = font.getbbox(value, anchor="ls")
+    mask = Image.new("L", (max(1, right - left), max(1, bottom - top)))
+    ImageDraw.Draw(mask).text((-left, -top), value, fill=255, font=font, anchor="ls")
+    return mask, left, top
+
+
+def _paint_labels(canvas: np.ndarray, labels: list[tuple[str, int, int, int, tuple[int, int, int], bool]]) -> np.ndarray:
+    """Paint all labels together to avoid a full image conversion per label."""
+    image = Image.fromarray(canvas)
+    for value, x, y, size, color, bold in labels:
+        # The image contains BGR channels, so use the same order for ink colors.
+        mask, offset_x, offset_y = _label_mask(value, size, bold)
+        image.paste(color, (x + offset_x, y + offset_y), mask)
+    return np.asarray(image).copy()
 
 
 def _clock(seconds: float) -> str:
@@ -87,9 +131,9 @@ def clip_chart_window(history: list[dict[str, Any]], elapsed: float, threshold: 
 def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]], elapsed: float,
                     threshold: float, x: int, y: int, width: int, height: int) -> None:
     """Plot actual gate distances, with a clear scale and event markers."""
-    white, muted = (244, 243, 240), (177, 165, 154)
-    person_color, background_color = (207, 226, 91), (145, 198, 245)
-    grid, threshold_color = (65, 60, 56), (170, 166, 160)
+    muted = MUTED
+    person_color, background_color = PERSON, BACKGROUND
+    grid, threshold_color = (218, 222, 217), (140, 144, 138)
     samples, start, end, upper = clip_chart_window(history, elapsed, threshold)
     left, right = x + 53, x + width - 10
     top, bottom = y + 8, y + height - 24
@@ -104,7 +148,7 @@ def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]],
     def sy(distance: float) -> int:
         return int(round(bottom - min(max(distance, 0.0), upper) / upper * plot_h))
 
-    cv2.rectangle(canvas, (left, top), (right, bottom), (25, 23, 22), -1)
+    cv2.rectangle(canvas, (left, top), (right, bottom), PANEL, -1)
     step = _nice_step(upper / 4.0)
     for index in range(int(round(upper / step)) + 1):
         value = min(upper, index * step)
@@ -144,7 +188,7 @@ def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]],
             marker_y = min(sy(value) for value in values)
             for cursor in range(min(marker_y + 6, bottom), bottom, 9):
                 cv2.line(canvas, (marker_x, cursor), (marker_x, min(cursor + 4, bottom)),
-                         (135, 130, 122), 1, cv2.LINE_AA)
+                         RESET, 1, cv2.LINE_AA)
     for region, color in (("person", person_color), ("background", background_color)):
         previous = None
         for item in samples:
@@ -156,32 +200,36 @@ def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]],
                 cv2.line(canvas, segment_start, point, color, 2, cv2.LINE_AA)
             cv2.circle(canvas, point, 2, color, -1, cv2.LINE_AA)
             if item["trigger_region"] in (region, "full"):
-                cv2.circle(canvas, point, 5, white, 1, cv2.LINE_AA)
+                cv2.circle(canvas, point, 5, INK, 1, cv2.LINE_AA)
             previous = (item["time_seconds"], point, item["trigger_region"])
+
 
 
 
 def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed: float,
                      show_details: bool = False) -> np.ndarray:
-    """Render the camera, context and all pipeline stages on the main view."""
+    """Render the camera, context, model stages and change trace."""
     height, width = 1080, 1920
-    background, card = (19, 17, 16), (34, 30, 27)
-    white, muted = (244, 243, 240), (177, 165, 154)
-    teal, amber, divider = (207, 226, 91), (145, 198, 245), (62, 56, 50)
-    canvas = np.full((height, width, 3), background, dtype=np.uint8)
+    canvas = np.full((height, width, 3), PAPER, dtype=np.uint8)
+    labels: list[tuple[str, int, int, int, tuple[int, int, int], bool]] = []
 
-    def text(value: str, x: int, y: int, scale: float = 0.5,
-             color: tuple[int, int, int] = white, thickness: int = 1) -> None:
-        cv2.putText(canvas, value, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
-                    scale, color, thickness, cv2.LINE_AA)
+    def text(value: str, x: int, y: int, size: int = 16,
+             color: tuple[int, int, int] = INK, bold: bool = False) -> None:
+        labels.append((str(value), x, y, size, color, bold))
 
-    def line(x1: int, y1: int, x2: int, y2: int) -> None:
-        cv2.line(canvas, (x1, y1), (x2, y2), divider, 1, cv2.LINE_AA)
+    def wrapped(value: str, max_width: int, size: int, max_lines: int,
+                bold: bool = False) -> list[str]:
+        font = _label_font(size, bold)
+        return wrap_display_text(cv2, value, max_width, 0.5, max_lines, measure=font.getlength)
+
+    def line(x1: int, y1: int, x2: int, y2: int, color: tuple[int, int, int] = RULE,
+             thickness: int = 1) -> None:
+        cv2.line(canvas, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
 
     def place_view(image: np.ndarray | None, x: int, y: int, w: int, h: int) -> None:
-        canvas[y:y + h, x:x + w] = (10, 12, 16)
+        canvas[y:y + h, x:x + w] = (33, 34, 32)
         if image is None:
-            text("Awaiting frame", x + 16, y + h // 2, 0.43, muted)
+            text("Awaiting frame", x + 16, y + h // 2, 15, (220, 222, 219))
             return
         source_height, source_width = image.shape[:2]
         scale = min(w / source_width, h / source_height)
@@ -191,100 +239,98 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         x0, y0 = x + (w - image_w) // 2, y + (h - image_h) // 2
         canvas[y0:y0 + image_h, x0:x0 + image_w] = view
 
-    text("EVENT-TRIGGERED VISUAL REASONING", 25, 38, 0.76, white, 2)
-    text("LIVE PERCEPTION DEMO", 26, 63, 0.43, muted)
-    cv2.circle(canvas, (1760, 37), 5, teal, -1, cv2.LINE_AA)
-    text("LIVE", 1774, 42, 0.48, teal)
-    text(_clock(elapsed), 1848, 42, 0.5, muted)
+    # A quiet header and rules give the screen the character of a lab instrument.
+    text("EVENT-TRIGGERED VISUAL REASONING", 25, 38, 27, INK, True)
+    text("CAMERA  /  VISUAL CHANGE  /  CONTEXT", 26, 62, 13, MUTED, True)
+    cv2.circle(canvas, (1732, 32), 4, BACKGROUND, -1, cv2.LINE_AA)
+    text("LIVE", 1744, 37, 14, BACKGROUND, True)
+    text(_clock(elapsed), 1838, 38, 18, INK, True)
+    line(24, 75, 1896, 75, INK)
 
-    # The live camera is independent of the most recently processed frame.
-    vx, vy, vw, vh = 24, 88, 880, 495
-    place_view(frame, vx, vy, vw, vh)
-    _rounded_box(cv2, canvas, vx + 16, vy + 16, 150, 32, background, 8)
-    cv2.circle(canvas, (vx + 31, vy + 32), 4, teal, -1, cv2.LINE_AA)
-    text("LIVE CAMERA", vx + 43, vy + 37, 0.45, white)
+    text("CAMERA", 25, 101, 14, INK, True)
+    text("LIVE INPUT", 818, 101, 13, MUTED)
+    place_view(frame, 24, 111, 880, 472)
+    line(914, 90, 914, 583)
 
-    px, pw = 924, 972
-    _rounded_box(cv2, canvas, px, 88, pw, 230, card)
-    text("CURRENT CONTEXT", px + 22, 120, 0.48, muted)
+    px, pw = 935, 961
+    text("CURRENT CONTEXT", px, 101, 14, INK, True)
     description = state["task"] or "Waiting for the first observation"
-    for index, item in enumerate(wrap_display_text(cv2, description, pw - 49, 0.70, 3)):
-        text(item, px + 22, 156 + index * 26, 0.70, white)
-    line(px + 22, 239, px + pw - 22, 239)
+    for index, item in enumerate(wrapped(description, pw - 26, 26, 3)):
+        text(item, px, 145 + index * 33, 26, INK)
+    line(px, 239, px + pw, 239)
     source = state["last_source"]
     if source == "vlm":
-        source_text, source_color = "GENERATED BY LLaVA", teal
+        source_text, source_color = "GENERATED BY LLaVA", INK
     elif source == "cache":
-        source_text, source_color = "REUSED FROM CLIP MEMORY", amber
+        source_text, source_color = "REUSED FROM CLIP MEMORY", PERSON
     else:
-        source_text, source_color = "WAITING FOR A DESCRIPTION", muted
-    cv2.circle(canvas, (px + 27, 263), 4, source_color, -1, cv2.LINE_AA)
-    text(source_text, px + 40, 268, 0.45, source_color)
+        source_text, source_color = "WAITING FOR A DESCRIPTION", MUTED
+    text(source_text, px, 266, 14, source_color, True)
     if state["answer_time"] is not None:
         age = max(0, elapsed - state["answer_time"])
-        text(f"Frame captured {age:.1f}s ago", px + 22, 296, 0.46, muted)
+        text(f"Frame captured {age:.1f}s ago", px, 290, 15, MUTED)
     else:
-        text("The first observation is being prepared", px + 22, 296, 0.43, muted)
+        text("The first observation is being prepared", px, 290, 15, MUTED)
     status = "PROCESSING" if state["busy"] else "MONITORING"
-    text(status, px + pw - 142, 296, 0.40, teal if state["busy"] else muted)
+    text(status, px + pw - 110, 290, 13, PERSON if state["busy"] else MUTED, True)
 
-    _rounded_box(cv2, canvas, px, 334, pw, 249, card)
+    line(px, 317, px + pw, 317, INK)
     if show_details:
-        text("EXPANDED DETAILS", px + 22, 365, 0.53, white)
-        text("D  BACK TO HISTORY", px + pw - 164, 365, 0.39, muted)
-        line(px + 22, 376, px + pw - 22, 376)
+        text("EXPANDED DETAILS", px, 346, 15, INK, True)
+        text("D  BACK TO HISTORY", px + pw - 153, 346, 13, MUTED)
+        line(px, 358, px + pw, 358)
         match = state["last_match"] or {}
         candidate = match.get("best_description") or "No candidate yet"
-        text("BEST CACHED CANDIDATE", px + 22, 401, 0.42, muted)
-        for index, item in enumerate(wrap_display_text(cv2, candidate, pw - 52, 0.48, 2)):
-            text(item, px + 22, 426 + index * 20, 0.48, white)
+        text("BEST CACHED CANDIDATE", px, 384, 13, MUTED, True)
+        for index, item in enumerate(wrapped(candidate, pw - 20, 17, 2)):
+            text(item, px, 411 + index * 23, 17, INK)
         best = match.get("best_similarity")
         gap = match.get("margin")
         best_str = f"{best:.3f}" if best is not None else "--"
         gap_str = f"{gap:.3f}" if gap is not None else "--"
         text(f"Similarity: {best_str}   Gap: {gap_str}   Decision: {match.get('reason', '--')}",
-             px + 22, 491, 0.46, muted)
+             px, 478, 16, INK)
         text(f"Samples: {state['samples']}   Triggers: {state['triggers']}   Queued replaced: {state['dropped']}",
-             px + 22, 522, 0.46, muted)
-        text("Timings are measured after the change gate.", px + 22, 555, 0.42, muted)
+             px, 512, 16, INK)
+        text("Timings are measured after the change gate.", px, 548, 14, MUTED)
     else:
-        text("RECENT OBSERVATIONS", px + 22, 365, 0.53, white)
-        text("LATEST 3", px + pw - 110, 365, 0.4, muted)
-        line(px + 22, 376, px + pw - 22, 376)
+        text("RECENT OBSERVATIONS", px, 346, 15, INK, True)
+        text("LATEST 3", px + pw - 73, 346, 13, MUTED)
+        line(px, 358, px + pw, 358)
         recent = state["timeline"][-3:]
         if not recent:
-            text("Observations will appear here", px + 22, 411, 0.48, muted)
+            text("Observations will appear here", px, 392, 16, MUTED)
         for index, event in enumerate(recent):
-            y = 403 + index * 53
-            text(_clock(event["time_seconds"]), px + 22, y, 0.45, white)
+            y = 387 + index * 62
+            text(_clock(event["time_seconds"]), px, y, 15, INK, True)
             event_source = "LLaVA" if event["source"] == "vlm" else "Memory"
-            event_color = teal if event["source"] == "vlm" else amber
-            text(event_source, px + 22, y + 19, 0.39, event_color)
-            for line_index, item in enumerate(wrap_display_text(cv2, event["task"], pw - 142, 0.54, 2)):
-                text(item, px + 106, y + line_index * 19, 0.54, white)
+            event_color = MUTED if event["source"] == "vlm" else PERSON
+            text(event_source, px, y + 20, 13, event_color)
+            for line_index, item in enumerate(wrapped(event["task"], pw - 114, 17, 2)):
+                text(item, px + 94, y + line_index * 22, 17, INK)
+            if index < len(recent) - 1:
+                line(px, y + 33, px + pw, y + 33)
 
-    # All components and the former diagnostic measurements remain visible.
-    top, card_h = 599, 249
-    left, mid, right = 24, 644, 1264
-    left_w, mid_w, right_w = 600, 600, 632
-    for x, panel_width in ((left, left_w), (mid, mid_w), (right, right_w)):
-        _rounded_box(cv2, canvas, x, top, panel_width, card_h, card)
-
-    text("01", left + 20, 629, 0.65, teal, 2)
-    text("MediaPipe", left + 63, 629, 0.68, white, 2)
-    text("Separate person and background", left + 20, 653, 0.52, muted)
-    text("PERSON VIEW", left + 20, 678, 0.43, muted)
-    text("BACKGROUND VIEW", left + 306, 678, 0.43, muted)
+    # Stage panels use dividers, not floating cards, so they read as one pipeline.
+    line(24, 599, 1896, 599, INK)
+    line(633, 611, 633, 843)
+    line(1253, 611, 1253, 843)
+    left, mid, right = 24, 645, 1265
+    text("01", left, 629, 15, PERSON, True)
+    text("MediaPipe", left + 36, 629, 23, INK, True)
+    text("Separate person and background", left, 654, 15, MUTED)
+    text("PERSON VIEW", left, 680, 13, MUTED, True)
+    text("BACKGROUND VIEW", left + 290, 680, 13, MUTED, True)
     previews = state["region_previews"]
-    place_view(previews.get("person"), left + 20, 687, 274, 127)
-    place_view(previews.get("background"), left + 306, 687, 274, 127)
+    place_view(previews.get("person"), left, 688, 275, 127)
+    place_view(previews.get("background"), left + 290, 688, 275, 127)
     preview_time = state["preview_time"]
     preview_label = _clock(preview_time) if preview_time is not None else "--"
-    text(f"Sample captured at: {preview_label}", left + 20, 837, 0.43, muted)
+    text(f"Sample captured at: {preview_label}", left, 837, 14, MUTED)
 
-    text("02", mid + 20, 629, 0.65, teal, 2)
-    text("CLIP", mid + 63, 629, 0.68, white, 2)
-    text("Detect visual change and match memory", mid + 20, 653, 0.52, muted)
+    text("02", mid, 629, 15, PERSON, True)
+    text("CLIP", mid + 36, 629, 23, INK, True)
+    text("Detect visual change and match memory", mid, 654, 15, MUTED)
     distances = state["last_distances"]
     person_value = f"{distances['person']:.3f}" if distances else "--"
     background_value = f"{distances['background']:.3f}" if distances else "--"
@@ -304,13 +350,13 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         ("Match / gap thresholds", f"{state['min_similarity']:.2f} / {state['min_margin']:.2f}"),
     ]
     for index, (label, value) in enumerate(clip_rows):
-        y = 682 + index * 30
-        text(label, mid + 20, y, 0.50, muted)
-        text(value, mid + 345, y, 0.50, white)
+        y = 683 + index * 30
+        text(label, mid, y, 16, MUTED)
+        text(value, mid + 342, y, 16, INK)
 
-    text("03", right + 20, 629, 0.65, teal, 2)
-    text("LLaVA", right + 63, 629, 0.68, white, 2)
-    text("Describe when no memory matches", right + 20, 653, 0.52, muted)
+    text("03", right, 629, 15, PERSON, True)
+    text("LLaVA", right + 36, 629, 23, INK, True)
+    text("Describe when no memory matches", right, 654, 15, MUTED)
     source_label = {"vlm": "LLaVA", "cache": "CLIP memory"}.get(source, "--")
     resolve = state["last_resolution_ms"]
     resolve_text = f"{resolve:.0f} ms" if resolve is not None else "--"
@@ -323,26 +369,27 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         ("Mode", state["mode"].upper()),
     ]
     for index, (label, value) in enumerate(llava_rows):
-        y = 682 + index * 30
-        text(label, right + 20, y, 0.50, muted)
-        text(value, right + 345, y, 0.50, white)
+        y = 683 + index * 30
+        text(label, right, y, 16, MUTED)
+        text(value, right + 342, y, 16, INK)
 
-    # A full-width chart keeps the trace readable without hiding model details.
-    _rounded_box(cv2, canvas, 24, 858, 1872, 181, card)
-    text("CLIP CHANGE OVER TIME", 45, 882, 0.58, white, 1)
-    text("Cosine distance to each region reference", 333, 882, 0.43, muted)
-    cv2.line(canvas, (810, 876), (834, 876), teal, 2, cv2.LINE_AA)
-    text("Person", 845, 882, 0.45, teal)
-    cv2.line(canvas, (932, 876), (956, 876), amber, 2, cv2.LINE_AA)
-    text("Background", 967, 882, 0.45, amber)
-    text(f"Threshold {state['gate_threshold']:.2f}", 1126, 882, 0.45, muted)
-    cv2.circle(canvas, (1327, 876), 5, white, 1, cv2.LINE_AA)
-    text("Trigger  |  dashed drop = reset", 1339, 882, 0.45, muted)
+    # The full-width trace retains the measured values and explicit reset marks.
+    cv2.rectangle(canvas, (24, 855), (1896, 1038), PANEL, -1)
+    line(24, 855, 1896, 855, INK)
+    text("CLIP CHANGE OVER TIME", 45, 881, 17, INK, True)
+    text("Cosine distance to each region reference", 335, 881, 13, MUTED)
+    line(810, 875, 834, 875, PERSON, 2)
+    text("Person", 845, 881, 14, PERSON, True)
+    line(932, 875, 956, 875, BACKGROUND, 2)
+    text("Background", 967, 881, 14, BACKGROUND, True)
+    text(f"Threshold {state['gate_threshold']:.2f}", 1126, 881, 14, MUTED)
+    cv2.circle(canvas, (1327, 875), 5, INK, 1, cv2.LINE_AA)
+    text("Trigger  |  dashed drop = reset", 1339, 881, 14, MUTED)
     draw_clip_chart(cv2, canvas, state["distance_history"], elapsed, state["gate_threshold"],
                     42, 889, 1836, 144)
 
-    text("D  Expanded details", 25, 1065, 0.42, muted)
-    text("Q  Quit", 190, 1065, 0.42, muted)
-    text("Dashed drops: reference reset   |   Gaps: samples unavailable", 410, 1065, 0.42, muted)
-    text("Contexts are inferred from individual frames.", 1450, 1065, 0.40, muted)
-    return canvas
+    text("D  Expanded details", 25, 1065, 13, MUTED)
+    text("Q  Quit", 190, 1065, 13, MUTED)
+    text("Dashed drops: reference reset   |   Gaps: samples unavailable", 410, 1065, 13, MUTED)
+    text("Contexts are inferred from individual frames.", 1460, 1065, 13, MUTED)
+    return _paint_labels(canvas, labels)

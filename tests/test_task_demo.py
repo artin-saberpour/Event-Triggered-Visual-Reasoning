@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from vision_events.dashboard import clip_chart_window, draw_clip_chart
+from vision_events.dashboard import BACKGROUND, INK, PAPER, PERSON, RESET, clip_chart_window, draw_clip_chart
 from vision_events.task_demo import (
     LatestFrameWorker, TaskDemoEngine, make_region_previews, parse_observation, render_dashboard, run_demo,
     wrap_display_text,
@@ -203,6 +203,14 @@ class TaskDemoTests(unittest.TestCase):
             def putText(cls, image, value, *args):
                 cls.lines.append(value)
 
+        def capture_labels(canvas, labels):
+            FakeCV2.lines.extend(label[0] for label in labels)
+            return canvas
+
+        def render(*args, **kwargs):
+            with patch("vision_events.dashboard._paint_labels", side_effect=capture_labels):
+                return render_dashboard(*args, **kwargs)
+
         engine = TaskDemoEngine(FakeModel(["Holding a phone to their ear."]), 0.1)
         _, state = engine.process(frame(0), 2.0)
         state.update(busy=False, dropped=0, error=None,
@@ -211,7 +219,7 @@ class TaskDemoTests(unittest.TestCase):
                          {"time_seconds": 3.0, "person": 0.02, "background": 0.01, "trigger_region": None},
                          {"time_seconds": 4.0, "person": 0.12, "background": 0.02, "trigger_region": "person"},
                      ])
-        dashboard = render_dashboard(FakeCV2, frame(0), state, 5.0)
+        dashboard = render(FakeCV2, frame(0), state, 5.0)
         self.assertEqual(dashboard.shape, (1080, 1920, 3))
         self.assertIn("Holding a phone to their ear.", FakeCV2.lines)
         self.assertIn("RECENT OBSERVATIONS", FakeCV2.lines)
@@ -226,25 +234,28 @@ class TaskDemoTests(unittest.TestCase):
         self.assertIn("Background", FakeCV2.lines)
         self.assertIn("Threshold 0.10", FakeCV2.lines)
         self.assertIn("Trigger  |  dashed drop = reset", FakeCV2.lines)
-        self.assertTrue(any(segment[2] == (207, 226, 91) and segment[3] == 2 for segment in FakeCV2.segments))
-        self.assertTrue(any(segment[2] == (145, 198, 245) and segment[3] == 2 for segment in FakeCV2.segments))
-        self.assertTrue(any(c[1:] == (5, (244, 243, 240), 1) for c in FakeCV2.circles))
+        self.assertTrue(any(segment[2] == PERSON and segment[3] == 2 for segment in FakeCV2.segments))
+        self.assertTrue(any(segment[2] == BACKGROUND and segment[3] == 2 for segment in FakeCV2.segments))
+        self.assertTrue(any(c[1:] == (5, INK, 1) for c in FakeCV2.circles))
         self.assertIn("LLaVA calls / memory reuses", FakeCV2.lines)
         self.assertIn("Match / gap thresholds", FakeCV2.lines)
+
+        painted = render_dashboard(FakeCV2, frame(0), state, 5.0)
+        self.assertTrue(np.any(painted[10:55, 20:650] != PAPER))
 
         FakeCV2.lines.clear()
         state.update(last_source="cache", cache_hits=1, cache_size=2, last_resolution_ms=0.7,
                      last_trigger_time=1.0,
                      last_match={"best_similarity": 0.38, "margin": 0.08, "reason": "matched"},
                      timeline=[{"time_seconds": 2.0, "task": "Holding a phone.", "source": "cache"}])
-        render_dashboard(FakeCV2, frame(0), state, 5.0)
+        render(FakeCV2, frame(0), state, 5.0)
         self.assertIn("REUSED FROM CLIP MEMORY", FakeCV2.lines)
         self.assertIn("Memory", FakeCV2.lines)
         self.assertIn("Memory similarity / gap", FakeCV2.lines)
         self.assertIn("0.380 / 0.080", FakeCV2.lines)
 
         FakeCV2.lines.clear()
-        render_dashboard(FakeCV2, frame(0), state, 5.0, show_details=True)
+        render(FakeCV2, frame(0), state, 5.0, show_details=True)
         self.assertIn("EXPANDED DETAILS", FakeCV2.lines)
         self.assertIn("BEST CACHED CANDIDATE", FakeCV2.lines)
         self.assertIn("Similarity: 0.380   Gap: 0.080   Decision: matched", FakeCV2.lines)
@@ -262,9 +273,9 @@ class TaskDemoTests(unittest.TestCase):
             {"time_seconds": 10.0, "person": 0.12, "background": 0.02, "trigger_region": "person"},
         ]
         draw_clip_chart(FakeCV2, dashboard, gap_history, 12.0, 0.1, 0, 0, 400, 100)
-        self.assertFalse(any(s[2] in ((207, 226, 91), (145, 198, 245)) and s[3] == 2
+        self.assertFalse(any(s[2] in (PERSON, BACKGROUND) and s[3] == 2
                              for s in FakeCV2.segments))
-        self.assertTrue(any(s[2] == (135, 130, 122) and s[3] == 1 for s in FakeCV2.segments))
+        self.assertTrue(any(s[2] == RESET and s[3] == 1 for s in FakeCV2.segments))
 
         FakeCV2.segments.clear()
         reset_history = [
@@ -273,8 +284,8 @@ class TaskDemoTests(unittest.TestCase):
             {"time_seconds": 3.0, "person": 0.01, "background": 0.03, "trigger_region": None},
         ]
         draw_clip_chart(FakeCV2, dashboard, reset_history, 4.0, 0.1, 0, 0, 400, 100)
-        person_segments = [s for s in FakeCV2.segments if s[2] == (207, 226, 91) and s[3] == 2]
-        background_segments = [s for s in FakeCV2.segments if s[2] == (145, 198, 245) and s[3] == 2]
+        person_segments = [s for s in FakeCV2.segments if s[2] == PERSON and s[3] == 2]
+        background_segments = [s for s in FakeCV2.segments if s[2] == BACKGROUND and s[3] == 2]
         self.assertEqual(len(person_segments), 2)
         self.assertEqual(len(background_segments), 2)
         self.assertEqual(person_segments[1][0], (222, 76))
@@ -283,7 +294,7 @@ class TaskDemoTests(unittest.TestCase):
         FakeCV2.segments.clear()
         reset_history[1]["trigger_region"] = "full"
         draw_clip_chart(FakeCV2, dashboard, reset_history, 4.0, 0.1, 0, 0, 400, 100)
-        background_segments = [s for s in FakeCV2.segments if s[2] == (145, 198, 245) and s[3] == 2]
+        background_segments = [s for s in FakeCV2.segments if s[2] == BACKGROUND and s[3] == 2]
         self.assertEqual(len(background_segments), 2)
         self.assertEqual(background_segments[1][0], (222, 76))
 
@@ -293,14 +304,14 @@ class TaskDemoTests(unittest.TestCase):
             {"time_seconds": 10.0, "person": 0.02, "background": 0.02, "trigger_region": None},
         ]
         draw_clip_chart(FakeCV2, dashboard, gap_after_reset, 12.0, 0.1, 0, 0, 400, 100)
-        self.assertFalse(any(s[2] in ((207, 226, 91), (145, 198, 245)) and s[3] == 2
+        self.assertFalse(any(s[2] in (PERSON, BACKGROUND) and s[3] == 2
                              for s in FakeCV2.segments))
 
         FakeCV2.lines.clear()
         FakeCV2.segments.clear()
         draw_clip_chart(FakeCV2, dashboard, [], 0.0, 0.1, 0, 0, 400, 100)
         self.assertIn("Waiting for processed CLIP samples", FakeCV2.lines)
-        self.assertFalse(any(s[2] in ((207, 226, 91), (145, 198, 245)) and s[3] == 2
+        self.assertFalse(any(s[2] in (PERSON, BACKGROUND) and s[3] == 2
                              for s in FakeCV2.segments))
 
     def test_camera_loop_initializes_inference_and_cleans_up(self):
@@ -389,13 +400,18 @@ class TaskDemoTests(unittest.TestCase):
             def destroyAllWindows(cls):
                 cls.destroyed = True
 
+        def capture_labels(canvas, labels):
+            FakeCV2.lines.extend(label[0] for label in labels)
+            return canvas
+
         with tempfile.TemporaryDirectory() as temp:
             log_path = Path(temp) / "events.jsonl"
             args = SimpleNamespace(sample_seconds=1.0, threshold=0.1, camera=0,
                                    log=str(log_path), device="cpu", mode="hybrid",
                                    min_similarity=0.30, min_margin=0.04)
             with patch.dict("sys.modules", {"cv2": FakeCV2}), \
-                    patch("vision_events.models.VisionModels", return_value=model):
+                    patch("vision_events.models.VisionModels", return_value=model), \
+                    patch("vision_events.dashboard._paint_labels", side_effect=capture_labels):
                 run_demo(args)
             records = [json.loads(line) for line in log_path.read_text().splitlines()]
         self.assertEqual(records[0]["inference"]["task"], "Drinking from a cup.")
