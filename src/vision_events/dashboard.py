@@ -235,7 +235,8 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         scale = min(w / source_width, h / source_height)
         image_w = max(1, int(source_width * scale))
         image_h = max(1, int(source_height * scale))
-        view = cv2.resize(image, (image_w, image_h))
+        interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        view = cv2.resize(image, (image_w, image_h), interpolation=interpolation)
         x0, y0 = x + (w - image_w) // 2, y + (h - image_h) // 2
         canvas[y0:y0 + image_h, x0:x0 + image_w] = view
 

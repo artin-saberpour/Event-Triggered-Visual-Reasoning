@@ -89,6 +89,14 @@ python -m vision_events.task_demo --camera 0 --device cuda --log outputs\task-de
 
 The first run downloads CLIP and LLaVA weights. LLaVA 1.5 7B needs substantial disk space and GPU memory; `--device cpu` is available but may be very slow. Use `--camera 1` if a different webcam is needed. Press **Q** or **Esc** to quit. The optional JSONL log contains gate decisions, cache scores, sources, timing and actual VLM responses, but no images. It must be a new path, so change the filename for each run.
 
+For a screen recording, try a full-screen dashboard and request a sharper camera feed:
+
+```powershell
+python -m vision_events.task_demo --camera 0 --device cuda --sample-seconds 0.5 --fullscreen --camera-resolution 1280x720
+```
+
+The dashboard is drawn at 1920x1080. A 1920x1080 display and recording output can avoid extra resizing; other display sizes may scale it. The webcam may not support the requested size, so the console reports the actual frame dimensions after the models load. A different capture size can also change camera framing, speed and model results. Use the recording software's high-quality 1080p setting and check a short sample before recording the full demo.
+
 Place the webcam so the person's face, hands, and relevant objects are visible together. After the first observation, try holding a cup, using a keyboard, or holding a phone. Keep each action visible for a few seconds; once at least two different descriptions have been stored, return to an earlier activity and watch for `REUSED FROM MEMORY`.
 
 The baseline always calls LLaVA. After a visual trigger, the demo compares the full-frame CLIP embedding with the stored text embeddings. It reuses the best description only when there are at least two distinct candidates, the best cosine similarity is at least `--min-similarity` (default `0.30`), and the gap to the second is at least `--min-margin` (default `0.04`). Otherwise LLaVA describes the full frame, and its nonempty response is added to memory unless it contains certain explicit uncertainty phrases. Memory exists only for the current process; it starts empty on the next run.

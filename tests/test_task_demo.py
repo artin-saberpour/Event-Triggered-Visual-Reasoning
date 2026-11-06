@@ -1,3 +1,4 @@
+import argparse
 import io
 import json
 from pathlib import Path
@@ -12,8 +13,8 @@ from PIL import Image
 
 from vision_events.dashboard import BACKGROUND, INK, PAPER, PERSON, RESET, clip_chart_window, draw_clip_chart
 from vision_events.task_demo import (
-    LatestFrameWorker, TaskDemoEngine, make_region_previews, parse_observation, render_dashboard, run_demo,
-    wrap_display_text,
+    LatestFrameWorker, TaskDemoEngine, make_region_previews, parse_camera_resolution, parse_observation,
+    render_dashboard, run_demo, wrap_display_text,
 )
 
 
@@ -175,12 +176,15 @@ class TaskDemoTests(unittest.TestCase):
     def test_dashboard_shows_label_timestamp_and_counts(self):
         class FakeCV2:
             FONT_HERSHEY_SIMPLEX = LINE_AA = 0
+            INTER_LINEAR, INTER_AREA = 1, 2
             lines = []
             segments = []
             circles = []
+            interpolations = []
 
-            @staticmethod
-            def resize(image, size):
+            @classmethod
+            def resize(cls, image, size, interpolation):
+                cls.interpolations.append(interpolation)
                 return np.zeros((size[1], size[0], 3), dtype=np.uint8)
 
             @staticmethod
@@ -242,6 +246,9 @@ class TaskDemoTests(unittest.TestCase):
 
         painted = render_dashboard(FakeCV2, frame(0), state, 5.0)
         self.assertTrue(np.any(painted[10:55, 20:650] != PAPER))
+        render(FakeCV2, np.zeros((1080, 1920, 3), dtype=np.uint8), state, 5.0)
+        self.assertIn(FakeCV2.INTER_AREA, FakeCV2.interpolations)
+        self.assertIn(FakeCV2.INTER_LINEAR, FakeCV2.interpolations)
 
         FakeCV2.lines.clear()
         state.update(last_source="cache", cache_hits=1, cache_size=2, last_resolution_ms=0.7,
@@ -317,12 +324,17 @@ class TaskDemoTests(unittest.TestCase):
     def test_camera_loop_initializes_inference_and_cleans_up(self):
         class Camera:
             released = False
+            settings = []
 
             def isOpened(self):
                 return True
 
             def read(self):
                 return True, frame(0)
+
+            def set(self, prop, value):
+                self.settings.append((prop, value))
+                return True
 
             def release(self):
                 self.released = True
@@ -345,8 +357,12 @@ class TaskDemoTests(unittest.TestCase):
 
         class FakeCV2:
             FONT_HERSHEY_SIMPLEX = LINE_AA = WINDOW_NORMAL = 0
+            INTER_LINEAR, INTER_AREA = 1, 2
+            CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT = 3, 4
+            WND_PROP_FULLSCREEN, WINDOW_FULLSCREEN = 5, 6
             destroyed = False
             lines = []
+            properties = []
             key_count = 0
 
             @staticmethod
@@ -359,10 +375,14 @@ class TaskDemoTests(unittest.TestCase):
 
             @staticmethod
             def resizeWindow(*args):
-                pass
+                raise AssertionError("Fullscreen should not use windowed sizing")
+
+            @classmethod
+            def setWindowProperty(cls, *args):
+                cls.properties.append(args)
 
             @staticmethod
-            def resize(image, size):
+            def resize(image, size, interpolation):
                 return np.zeros((size[1], size[0], 3), dtype=np.uint8)
 
             @staticmethod
@@ -408,18 +428,33 @@ class TaskDemoTests(unittest.TestCase):
             log_path = Path(temp) / "events.jsonl"
             args = SimpleNamespace(sample_seconds=1.0, threshold=0.1, camera=0,
                                    log=str(log_path), device="cpu", mode="hybrid",
-                                   min_similarity=0.30, min_margin=0.04)
+                                   min_similarity=0.30, min_margin=0.04,
+                                   camera_resolution=(1280, 720), fullscreen=True)
+            output = io.StringIO()
             with patch.dict("sys.modules", {"cv2": FakeCV2}), \
                     patch("vision_events.models.VisionModels", return_value=model), \
-                    patch("vision_events.dashboard._paint_labels", side_effect=capture_labels):
+                    patch("vision_events.dashboard._paint_labels", side_effect=capture_labels), \
+                    patch("sys.stdout", output):
                 run_demo(args)
             records = [json.loads(line) for line in log_path.read_text().splitlines()]
         self.assertEqual(records[0]["inference"]["task"], "Drinking from a cup.")
         self.assertTrue(camera.released)
         self.assertTrue(model.closed)
         self.assertTrue(FakeCV2.destroyed)
+        self.assertEqual(camera.settings, [(FakeCV2.CAP_PROP_FRAME_WIDTH, 1280),
+                                           (FakeCV2.CAP_PROP_FRAME_HEIGHT, 720)])
+        self.assertEqual(FakeCV2.properties, [("Event-triggered task demo", FakeCV2.WND_PROP_FULLSCREEN,
+                                                FakeCV2.WINDOW_FULLSCREEN)])
+        self.assertIn("Actual webcam frames: 2x2 (different from the requested size)", output.getvalue())
         self.assertGreaterEqual(FakeCV2.lines.count("RECENT OBSERVATIONS"), 2)
         self.assertIn("EXPANDED DETAILS", FakeCV2.lines)
+
+    def test_camera_resolution_argument(self):
+        self.assertEqual(parse_camera_resolution("1280x720"), (1280, 720))
+        self.assertEqual(parse_camera_resolution("1920X1080"), (1920, 1080))
+        for invalid in ("bad", "1280", "0x720", "-1x720", "640x480x30"):
+            with self.subTest(invalid=invalid), self.assertRaises(argparse.ArgumentTypeError):
+                parse_camera_resolution(invalid)
 
 
 if __name__ == "__main__":

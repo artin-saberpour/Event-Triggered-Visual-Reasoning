@@ -12,6 +12,7 @@ import copy
 import json
 import math
 from pathlib import Path
+import sys
 import threading
 import time
 from typing import Any, TextIO
@@ -253,12 +254,45 @@ class LatestFrameWorker:
         self._thread.join()
 
 
+def parse_camera_resolution(value: str) -> tuple[int, int]:
+    """Parse a requested camera size without assuming the device supports it."""
+    try:
+        parts = value.lower().split("x")
+        if len(parts) != 2:
+            raise ValueError
+        width, height = (int(part) for part in parts)
+        if width <= 0 or height <= 0:
+            raise ValueError
+        return width, height
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Use a positive WIDTHxHEIGHT, for example 1280x720") from exc
+
+
+def _enable_windows_dpi_awareness() -> None:
+    """Ask Windows for physical pixels before any OpenCV window is created."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        try:
+            if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                return
+        except AttributeError:
+            pass
+        user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        # Windows may already have set process DPI awareness.
+        pass
+
+
 def run_demo(args: argparse.Namespace) -> None:
     if not math.isfinite(args.sample_seconds) or args.sample_seconds <= 0:
         raise ValueError("--sample-seconds must be positive and finite")
     # Validate the threshold before opening the camera or loading weights.
     RegionGate(args.threshold)
     ContextMemory(args.min_similarity, args.min_margin)
+    _enable_windows_dpi_awareness()
     try:
         import cv2
     except ImportError as exc:
@@ -272,6 +306,11 @@ def run_demo(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Could not open webcam {args.camera}. Try another --camera index.")
     model = worker = log = None
     try:
+        if args.camera_resolution is not None:
+            width, height = args.camera_resolution
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            print(f"Requested webcam resolution: {width}x{height}", flush=True)
         if args.log:
             path = Path(args.log)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -281,14 +320,26 @@ def run_demo(args: argparse.Namespace) -> None:
         engine = TaskDemoEngine(model, args.threshold, mode=args.mode,
                                 min_similarity=args.min_similarity, min_margin=args.min_margin)
         worker = LatestFrameWorker(engine, log)
-        cv2.namedWindow("Event-triggered task demo", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Event-triggered task demo", 1600, 900)
+        window = "Event-triggered task demo"
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+        if args.fullscreen:
+            cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        else:
+            cv2.resizeWindow(window, 1600, 900)
         start = next_sample = time.monotonic()
         show_details = False
+        reported_size = False
         while True:
             ok, frame = capture.read()
             if not ok:
                 raise RuntimeError("Could not read a webcam frame. Check the camera connection.")
+            if not reported_size:
+                height, width = frame.shape[:2]
+                suffix = ""
+                if args.camera_resolution and (width, height) != args.camera_resolution:
+                    suffix = " (different from the requested size)"
+                print(f"Actual webcam frames: {width}x{height}{suffix}", flush=True)
+                reported_size = True
             now = time.monotonic()
             if now >= next_sample:
                 worker.submit(frame, now - start)
@@ -296,7 +347,7 @@ def run_demo(args: argparse.Namespace) -> None:
             state = worker.snapshot()
             if state["error"]:
                 raise RuntimeError(f"Inference failed: {state['error']}")
-            cv2.imshow("Event-triggered task demo",
+            cv2.imshow(window,
                        render_dashboard(cv2, frame, state, now - start, show_details=show_details))
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), ord("Q"), 27):
@@ -317,6 +368,10 @@ def run_demo(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Show open-ended event-triggered observations from a webcam")
     parser.add_argument("--camera", type=int, default=0, help="Webcam index (default: 0)")
+    parser.add_argument("--camera-resolution", type=parse_camera_resolution,
+                        help="Request webcam capture size, e.g. 1280x720 (device support varies)")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="Display the dashboard full screen for recording")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--threshold", type=float, default=0.1, help="Gate cosine-distance threshold")
     parser.add_argument("--sample-seconds", type=float, default=1.0, help="Seconds between submitted camera frames")
