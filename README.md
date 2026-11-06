@@ -1,8 +1,8 @@
 # Event-Triggered Visual Reasoning
 
-**Use changes in the person and background to select when, and what, a vision-language model should inspect.**
+**Use visual change to decide when to update an open-ended scene description.**
 
-For interactive perception, sending every camera frame to a large vision-language model can be unnecessary. This exploratory prototype uses person segmentation and CLIP image embeddings to detect changes in different scene regions, then optionally routes the selected image to LLaVA.
+This prototype combines MediaPipe person/background segmentation, CLIP visual embeddings and LLaVA. The live webcam demo uses detected changes to decide when to reuse a previous description or generate a new one.
 
 `Vision-language models` · `CLIP` · `MediaPipe` · `LLaVA` · `Change detection`
 
@@ -12,9 +12,23 @@ For interactive perception, sending every camera frame to a large vision-languag
 
 **[Watch the demo on YouTube (1:20)](https://youtu.be/rildjGtj7tQ)**
 
-In the live demo, MediaPipe separates the person and background while CLIP detects visual changes. When a change is detected, the system can reuse a previously generated description or ask LLaVA to describe the full frame.
+The webcam interface shows the live image, person/background masks, CLIP distances and triggers, LLaVA descriptions, and memory reuse.
 
-[Live demo code and setup](https://github.com/artin-saberpour/Event-Triggered-Visual-Reasoning/tree/demo/webcam-task-observations-20261106#live-task-change-demo) are available on the demo branch.
+1. **Start with a description.** LLaVA describes the first frame and eligible descriptions are stored for the current session.
+2. **Watch for visual change.** MediaPipe separates person and background views. CLIP compares each view with its stored reference and triggers when a distance exceeds the threshold.
+3. **Check session memory.** On a trigger, CLIP compares the full-frame image embedding with stored description embeddings. A sufficiently distinct match is reused.
+4. **Describe a new frame.** If there is no suitable match, LLaVA describes the full frame and the result can be stored for later.
+
+Descriptions are open-ended; there is no predefined list of activities. Memory is cleared between runs. The default gate threshold is `0.10`; reuse requires at least two distinct descriptions, similarity of at least `0.30` and a margin of at least `0.04`. These thresholds are uncalibrated starting points.
+
+The live demo is currently on the [demo branch](https://github.com/artin-saberpour/Event-Triggered-Visual-Reasoning/tree/demo/webcam-task-observations-20261106#live-task-change-demo). After setting up the dependencies described there, run it from an existing clone with:
+
+```powershell
+git switch demo/webcam-task-observations-20261106
+python -m vision_events.task_demo --camera 0 --device auto
+```
+
+The command-line pipeline on `main` is the earlier region-routing variant described below.
 
 ## Real-world diagnostic example
 
@@ -37,7 +51,9 @@ The person-region view includes a mug and nearby desk objects even though no ful
 
 Distances are computed against each region's stored reference, which is refreshed after a corresponding event; they are not necessarily distances to the immediately preceding image. The threshold is applied to the person and background distances. These four samples demonstrate behavior on this particular input, not measured accuracy, latency, or model-call savings. [Run metadata and unrounded distances](examples/desk-diagnostic/desk_diagnostic.json).
 
-## Pipeline
+## Original region-routing CLI
+
+The following pipeline describes the command-line implementation on `main`. Unlike the live demo, it can send the selected region directly to LLaVA.
 
 **Frame → person/background segmentation → CLIP embeddings → change gate → selected view → optional LLaVA**
 
@@ -109,7 +125,7 @@ The first run downloads the required weights. CLIP uses a [pinned Hugging Face c
 ## Scope and validation
 
 - **What has been checked:** the model-independent gate is tested with synthetic vectors, including separate and simultaneous changes and reference updates. The capture-report path was also run with real MediaPipe and CLIP models on four desk snapshots.
-- **What remains to be checked:** live camera/video processing and the optional LLaVA path have not been verified end to end here. Latency, model-call reduction, missed events, and accuracy have not been measured.
+- **Live demo:** the video above shows an exploratory webcam run with LLaVA descriptions. It is a qualitative example; latency, model-call reduction, missed events and accuracy have not been measured in a controlled evaluation.
 - **Research context:** this is an AI-assisted reconstruction and refactoring of exploratory scripts, separate from the final method of the associated paper. Thresholds, segmentation quality, lighting, occlusion, and VLM errors can affect the behavior.
 
 A useful next evaluation would compare event-triggered routing with regular inference on the same recorded scenes, measuring missed events, response delay, and model calls. [See the project overview](https://artin-saberpour.github.io/projects/event-triggered-vision/).
