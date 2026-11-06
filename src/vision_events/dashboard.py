@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -60,6 +61,16 @@ def _clock(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _nice_step(minimum: float) -> float:
+    """Choose a readable axis interval without quantizing plotted values."""
+    magnitude = 10 ** math.floor(math.log10(minimum))
+    fraction = minimum / magnitude
+    for factor in (1.0, 2.0, 2.5, 5.0, 10.0):
+        if fraction <= factor + 1e-10:
+            return factor * magnitude
+    return 10.0 * magnitude
+
+
 def clip_chart_window(history: list[dict[str, Any]], elapsed: float, threshold: float,
                       window_seconds: float = 30.0) -> tuple[list[dict[str, Any]], float, float, float]:
     """Return visible processed samples and a cosine-distance plot range."""
@@ -67,23 +78,25 @@ def clip_chart_window(history: list[dict[str, Any]], elapsed: float, threshold: 
     start = max(0.0, end - window_seconds)
     samples = [item for item in history if start <= item["time_seconds"] <= end]
     max_distance = max((max(item["person"], item["background"]) for item in samples), default=0.0)
-    upper = min(2.0, max(0.15, threshold * 1.3, max_distance * 1.1))
+    target = min(2.0, max(0.20, threshold * 1.25, max_distance * 1.1))
+    step = _nice_step(target / 4.0)
+    upper = min(2.0, math.ceil(target / step - 1e-10) * step)
     return samples, start, end, upper
 
 
 def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]], elapsed: float,
                     threshold: float, x: int, y: int, width: int, height: int) -> None:
-    """Plot actual gate distances, with a dashed threshold and event rings."""
+    """Plot actual gate distances, with a clear scale and event markers."""
     white, muted = (244, 243, 240), (177, 165, 154)
     person_color, background_color = (207, 226, 91), (145, 198, 245)
-    grid, threshold_color = (66, 60, 54), (155, 150, 145)
+    grid, threshold_color = (65, 60, 56), (170, 166, 160)
     samples, start, end, upper = clip_chart_window(history, elapsed, threshold)
-    left, right = x + 41, x + width - 8
-    top, bottom = y + 4, y + height - 20
+    left, right = x + 53, x + width - 10
+    top, bottom = y + 8, y + height - 24
     plot_w, plot_h = right - left, bottom - top
 
     def text(value: str, tx: int, ty: int, color: tuple[int, int, int] = muted) -> None:
-        cv2.putText(canvas, value, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.34, color, 1, cv2.LINE_AA)
+        cv2.putText(canvas, value, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1, cv2.LINE_AA)
 
     def sx(seconds: float) -> int:
         return int(round(left + (seconds - start) / (end - start) * plot_w))
@@ -91,19 +104,44 @@ def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]],
     def sy(distance: float) -> int:
         return int(round(bottom - min(max(distance, 0.0), upper) / upper * plot_h))
 
-    cv2.line(canvas, (left, top), (left, bottom), grid, 1, cv2.LINE_AA)
-    cv2.line(canvas, (left, bottom), (right, bottom), grid, 1, cv2.LINE_AA)
+    cv2.rectangle(canvas, (left, top), (right, bottom), (25, 23, 22), -1)
+    step = _nice_step(upper / 4.0)
+    for index in range(int(round(upper / step)) + 1):
+        value = min(upper, index * step)
+        tick_y = sy(value)
+        cv2.line(canvas, (left, tick_y), (right, tick_y), grid, 1, cv2.LINE_AA)
+        label = f"{value:.2f}"
+        label_width = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)[0][0]
+        text(label, left - label_width - 9, tick_y + 4)
+
+    # The x-axis marks capture time, with gaps left empty when frames were not processed.
+    first_tick = int(math.ceil(start / 5.0) * 5)
+    for tick in range(first_tick, int(end) + 1, 5):
+        tick_x = sx(float(tick))
+        if tick_x - left < 60 or right - tick_x < 60:
+            continue
+        cv2.line(canvas, (tick_x, top), (tick_x, bottom), grid, 1, cv2.LINE_AA)
+        text(_clock(tick), tick_x - 16, y + height - 4)
+
     threshold_y = sy(threshold)
-    for cursor in range(left, right, 12):
-        cv2.line(canvas, (cursor, threshold_y), (min(cursor + 6, right), threshold_y),
+    for cursor in range(left, right, 18):
+        cv2.line(canvas, (cursor, threshold_y), (min(cursor + 10, right), threshold_y),
                  threshold_color, 1, cv2.LINE_AA)
-    text(f"{upper:.2f}", x + 1, top + 5)
-    text("0.00", x + 1, bottom + 4)
-    text(_clock(start), left, y + height - 3)
-    text(_clock(end), right - 37, y + height - 3)
+    text(_clock(start), left, y + height - 4)
+    text(_clock(end), right - 38, y + height - 4)
     if not samples:
         text("Waiting for processed CLIP samples", left + 18, top + plot_h // 2, muted)
         return
+    # Stems mark actual trigger times; the curves remain disconnected after a reset.
+    for item in samples:
+        affected = item["trigger_region"]
+        if affected is not None:
+            values = ([item["person"], item["background"]] if affected == "full"
+                      else [item[affected]])
+            marker_x = sx(item["time_seconds"])
+            marker_y = min(sy(value) for value in values)
+            cv2.line(canvas, (marker_x, min(marker_y + 6, bottom)), (marker_x, bottom),
+                     (86, 80, 74), 1, cv2.LINE_AA)
     for region, color in (("person", person_color), ("background", background_color)):
         previous = None
         for item in samples:
@@ -122,7 +160,7 @@ def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]],
 def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed: float,
                      show_details: bool = False) -> np.ndarray:
     """Render the camera, context and all pipeline stages on the main view."""
-    height, width = 900, 1600
+    height, width = 1080, 1920
     background, card = (19, 17, 16), (34, 30, 27)
     white, muted = (244, 243, 240), (177, 165, 154)
     teal, amber, divider = (207, 226, 91), (145, 198, 245), (62, 56, 50)
@@ -151,9 +189,9 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
 
     text("EVENT-TRIGGERED VISUAL REASONING", 25, 38, 0.76, white, 2)
     text("LIVE PERCEPTION DEMO", 26, 63, 0.43, muted)
-    cv2.circle(canvas, (1440, 37), 5, teal, -1, cv2.LINE_AA)
-    text("LIVE", 1454, 42, 0.48, teal)
-    text(_clock(elapsed), 1528, 42, 0.5, muted)
+    cv2.circle(canvas, (1760, 37), 5, teal, -1, cv2.LINE_AA)
+    text("LIVE", 1774, 42, 0.48, teal)
+    text(_clock(elapsed), 1848, 42, 0.5, muted)
 
     # The live camera is independent of the most recently processed frame.
     vx, vy, vw, vh = 24, 88, 880, 495
@@ -162,11 +200,11 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     cv2.circle(canvas, (vx + 31, vy + 32), 4, teal, -1, cv2.LINE_AA)
     text("LIVE CAMERA", vx + 43, vy + 37, 0.45, white)
 
-    px, pw = 924, 652
+    px, pw = 924, 972
     _rounded_box(cv2, canvas, px, 88, pw, 230, card)
     text("CURRENT CONTEXT", px + 22, 120, 0.48, muted)
     description = state["task"] or "Waiting for the first observation"
-    for index, item in enumerate(wrap_display_text(cv2, description, 603, 0.70, 3)):
+    for index, item in enumerate(wrap_display_text(cv2, description, pw - 49, 0.70, 3)):
         text(item, px + 22, 156 + index * 26, 0.70, white)
     line(px + 22, 239, px + pw - 22, 239)
     source = state["last_source"]
@@ -184,17 +222,17 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     else:
         text("The first observation is being prepared", px + 22, 296, 0.43, muted)
     status = "PROCESSING" if state["busy"] else "MONITORING"
-    text(status, px + 510, 296, 0.40, teal if state["busy"] else muted)
+    text(status, px + pw - 142, 296, 0.40, teal if state["busy"] else muted)
 
     _rounded_box(cv2, canvas, px, 334, pw, 249, card)
     if show_details:
         text("EXPANDED DETAILS", px + 22, 365, 0.53, white)
-        text("D  BACK TO HISTORY", px + 488, 365, 0.39, muted)
+        text("D  BACK TO HISTORY", px + pw - 164, 365, 0.39, muted)
         line(px + 22, 376, px + pw - 22, 376)
         match = state["last_match"] or {}
         candidate = match.get("best_description") or "No candidate yet"
         text("BEST CACHED CANDIDATE", px + 22, 401, 0.42, muted)
-        for index, item in enumerate(wrap_display_text(cv2, candidate, 600, 0.48, 2)):
+        for index, item in enumerate(wrap_display_text(cv2, candidate, pw - 52, 0.48, 2)):
             text(item, px + 22, 426 + index * 20, 0.48, white)
         best = match.get("best_similarity")
         gap = match.get("margin")
@@ -207,7 +245,7 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         text("Timings are measured after the change gate.", px + 22, 555, 0.42, muted)
     else:
         text("RECENT OBSERVATIONS", px + 22, 365, 0.53, white)
-        text("LATEST 3", px + 535, 365, 0.4, muted)
+        text("LATEST 3", px + pw - 110, 365, 0.4, muted)
         line(px + 22, 376, px + pw - 22, 376)
         recent = state["timeline"][-3:]
         if not recent:
@@ -218,13 +256,13 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
             event_source = "LLaVA" if event["source"] == "vlm" else "Memory"
             event_color = teal if event["source"] == "vlm" else amber
             text(event_source, px + 22, y + 19, 0.39, event_color)
-            for line_index, item in enumerate(wrap_display_text(cv2, event["task"], 510, 0.54, 2)):
+            for line_index, item in enumerate(wrap_display_text(cv2, event["task"], pw - 142, 0.54, 2)):
                 text(item, px + 106, y + line_index * 19, 0.54, white)
 
     # All components and the former diagnostic measurements remain visible.
     top, card_h = 599, 249
-    left, mid, right = 24, 484, 1132
-    left_w, mid_w, right_w = 440, 628, 444
+    left, mid, right = 24, 644, 1264
+    left_w, mid_w, right_w = 600, 600, 632
     for x, panel_width in ((left, left_w), (mid, mid_w), (right, right_w)):
         _rounded_box(cv2, canvas, x, top, panel_width, card_h, card)
 
@@ -232,27 +270,20 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     text("MediaPipe", left + 63, 629, 0.68, white, 2)
     text("Separate person and background", left + 20, 653, 0.52, muted)
     text("PERSON VIEW", left + 20, 678, 0.43, muted)
-    text("BACKGROUND VIEW", left + 225, 678, 0.43, muted)
+    text("BACKGROUND VIEW", left + 306, 678, 0.43, muted)
     previews = state["region_previews"]
-    place_view(previews.get("person"), left + 20, 687, 195, 127)
-    place_view(previews.get("background"), left + 225, 687, 195, 127)
+    place_view(previews.get("person"), left + 20, 687, 274, 127)
+    place_view(previews.get("background"), left + 306, 687, 274, 127)
     preview_time = state["preview_time"]
     preview_label = _clock(preview_time) if preview_time is not None else "--"
     text(f"Sample captured at: {preview_label}", left + 20, 837, 0.43, muted)
 
     text("02", mid + 20, 629, 0.65, teal, 2)
     text("CLIP", mid + 63, 629, 0.68, white, 2)
-    text("DISTANCE FROM REGION REFERENCE  |  30s", mid + 170, 629, 0.40, muted)
+    text("Detect visual change and match memory", mid + 20, 653, 0.52, muted)
     distances = state["last_distances"]
     person_value = f"{distances['person']:.3f}" if distances else "--"
     background_value = f"{distances['background']:.3f}" if distances else "--"
-    text(f"PERSON {person_value}", mid + 20, 653, 0.40, teal)
-    text(f"BACKGROUND {background_value}", mid + 155, 653, 0.40, amber)
-    text(f"THRESHOLD {state['gate_threshold']:.2f}", mid + 350, 653, 0.40, muted)
-    cv2.circle(canvas, (mid + 493, 648), 5, white, 1, cv2.LINE_AA)
-    text("TRIGGER", mid + 504, 653, 0.38, muted)
-    draw_clip_chart(cv2, canvas, state["distance_history"], elapsed, state["gate_threshold"],
-                    mid + 18, 660, mid_w - 36, 124)
     match = state["last_match"] or {}
     best, gap = match.get("best_similarity"), match.get("margin")
     best_str = f"{best:.3f}" if best is not None else "--"
@@ -260,11 +291,18 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     reasons = {"matched": "Matched", "empty": "No descriptions", "need_more_examples": "Need 2 descriptions",
                "low_similarity": "Low similarity", "ambiguous": "Ambiguous match"}
     reason = reasons.get(match.get("reason"), "--")
-    text(f"Samples {state['samples']}   Triggers {state['triggers']}   Last {state['last_trigger'] or '--'}",
-         mid + 20, 800, 0.43, muted)
-    text(f"Memory similarity / gap  {best_str} / {gap_str}    {reason}", mid + 20, 818, 0.43, muted)
-    text(f"Limits: gate {state['gate_threshold']:.2f}   match {state['min_similarity']:.2f}   gap {state['min_margin']:.2f}",
-         mid + 20, 836, 0.43, muted)
+    clip_rows = [
+        ("Samples / triggers", f"{state['samples']} / {state['triggers']}"),
+        ("Person / background distance", f"{person_value} / {background_value}"),
+        ("Last trigger / gate threshold", f"{state['last_trigger'] or '--'} / {state['gate_threshold']:.2f}"),
+        ("Memory similarity / gap", f"{best_str} / {gap_str}"),
+        ("Memory decision", reason),
+        ("Match / gap thresholds", f"{state['min_similarity']:.2f} / {state['min_margin']:.2f}"),
+    ]
+    for index, (label, value) in enumerate(clip_rows):
+        y = 682 + index * 30
+        text(label, mid + 20, y, 0.50, muted)
+        text(value, mid + 345, y, 0.50, white)
 
     text("03", right + 20, 629, 0.65, teal, 2)
     text("LLaVA", right + 63, 629, 0.68, white, 2)
@@ -283,9 +321,24 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     for index, (label, value) in enumerate(llava_rows):
         y = 682 + index * 30
         text(label, right + 20, y, 0.50, muted)
-        text(value, right + 300, y, 0.50, white)
+        text(value, right + 345, y, 0.50, white)
 
-    text("D  Expanded details", 25, 882, 0.42, muted)
-    text("Q  Quit", 190, 882, 0.42, muted)
-    text("Context descriptions are inferred from individual frames.", 1105, 882, 0.40, muted)
+    # A full-width chart keeps the trace readable without hiding model details.
+    _rounded_box(cv2, canvas, 24, 858, 1872, 181, card)
+    text("CLIP CHANGE OVER TIME", 45, 882, 0.58, white, 1)
+    text("Cosine distance to each region reference", 333, 882, 0.43, muted)
+    cv2.line(canvas, (810, 876), (834, 876), teal, 2, cv2.LINE_AA)
+    text("Person", 845, 882, 0.45, teal)
+    cv2.line(canvas, (932, 876), (956, 876), amber, 2, cv2.LINE_AA)
+    text("Background", 967, 882, 0.45, amber)
+    text(f"Threshold {state['gate_threshold']:.2f}", 1126, 882, 0.45, muted)
+    cv2.circle(canvas, (1327, 876), 5, white, 1, cv2.LINE_AA)
+    text("Trigger / reference refresh", 1339, 882, 0.45, muted)
+    draw_clip_chart(cv2, canvas, state["distance_history"], elapsed, state["gate_threshold"],
+                    42, 889, 1836, 144)
+
+    text("D  Expanded details", 25, 1065, 0.42, muted)
+    text("Q  Quit", 190, 1065, 0.42, muted)
+    text("Line breaks: reference refreshed or samples unavailable", 410, 1065, 0.42, muted)
+    text("Contexts are inferred from individual frames.", 1450, 1065, 0.40, muted)
     return canvas

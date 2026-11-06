@@ -282,7 +282,7 @@ def run_demo(args: argparse.Namespace) -> None:
                                 min_similarity=args.min_similarity, min_margin=args.min_margin)
         worker = LatestFrameWorker(engine, log)
         cv2.namedWindow("Event-triggered task demo", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Event-triggered task demo", 1280, 720)
+        cv2.resizeWindow("Event-triggered task demo", 1600, 900)
         start = next_sample = time.monotonic()
         show_details = False
         while True:
