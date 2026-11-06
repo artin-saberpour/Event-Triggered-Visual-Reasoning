@@ -79,7 +79,7 @@ Choose a new output path for each run. Images and results stay local unless you 
 
 ## Live task-change demo
 
-This webcam demo shows the live camera, the latest model label and a timeline of label changes. It is designed for a short sequence such as drinking from a cup and then typing a message on a computer. The labels are `DRINKING`, `TYPING`, and `UNCERTAIN`; no sequence is scripted. A camera view cannot establish that a message was actually sent.
+This webcam demo shows the live camera and open-ended descriptions of the person's visible activity. The model is not restricted to a fixed set of labels: it may describe drinking, typing, using a phone, or another activity. Each description is the model's actual response to one image, not a verified label or a scripted sequence.
 
 With the model dependencies installed as described below, start from the repository root:
 
@@ -89,9 +89,9 @@ python -m vision_events.task_demo --camera 0 --device cuda --log outputs\task-de
 
 The first run downloads CLIP and LLaVA weights. LLaVA 1.5 7B needs substantial disk space and GPU memory; `--device cpu` is available but may be very slow. Use `--camera 1` if a different webcam is needed. Press **Q** or **Esc** to quit. The optional JSONL log contains the actual gate decisions, distances and VLM responses, but no images. It must be a new path, so change the filename for each run.
 
-Place the webcam so the person's face, cup, hands and keyboard are visible together. After the model has loaded and the first observation appears, drink from the cup, pause, and then type. Keep each action visible for a few seconds. The baseline is classified once; after that the VLM is called only when the existing gate triggers. The gate reports the changed region, while the task classifier receives the full frame so objects needed to interpret the action are visible. The dashboard shows processed samples, gate triggers, VLM calls, and the capture time and age of the latest observation. Inference runs in the background and replaces queued stale frames when it cannot keep up. To share the demo, record the dashboard with a screen recorder.
+Place the webcam so the person's face, hands, and relevant objects are visible together. After the first observation, try holding a cup, using a keyboard, or holding a phone. Keep each action visible for a few seconds. The baseline is described once; after that the VLM is called only when the existing gate triggers. The gate reports the changed region, while the VLM receives the full frame so objects needed to interpret the activity are visible. The dashboard shows processed samples, gate triggers, VLM calls, and the capture time and age of the latest observation. It lists recent responses, not verified task changes: different words can describe the same activity. Inference runs in the background and replaces queued stale frames when it cannot keep up. To share the demo, record the dashboard with a screen recorder.
 
-This is a task-specific, single-image prototype, not verified action recognition. A held cup or a hand near a keyboard may be ambiguous; a model can also be wrong, the segmentation or gate can miss a change, and a label may remain visible after the scene changes. Tune `--threshold` and `--sample-seconds` for the scene. Test the sequence with the actual camera before presenting it. The live demo and LLaVA integration have not been validated end to end in this environment.
+This is a single-image prototype, not verified action recognition. The VLM has no audio or video memory and cannot tell what someone says or verify a message was sent. Texting may be indistinguishable from other phone use in a still frame. A model can be wrong, the segmentation or gate can miss a change, and an old description may remain visible after the scene changes. If the trigger count does not increase during a change, try a lower threshold such as `--threshold 0.05`; this may cause more triggers and VLM calls. Test the sequence with the actual camera before presenting it. This open-ended version has not been evaluated on real recordings here.
 
 ## Try a camera or video
 

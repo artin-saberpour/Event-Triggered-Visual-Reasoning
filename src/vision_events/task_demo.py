@@ -1,7 +1,7 @@
-"""Live, event-triggered webcam demo for drinking and keyboard use.
+"""Live, event-triggered webcam demo with open-ended descriptions.
 
-The gate detects changes; the VLM labels individual still frames. The labels
-are observations, not proof of a completed action or a sent message.
+The gate detects visual changes; the VLM describes individual still frames.
+Its descriptions are not proof of a completed action or a person's intent.
 """
 
 from __future__ import annotations
@@ -21,24 +21,20 @@ from .gate import RegionGate
 
 
 TASK_QUESTION = (
-    "Look at this single image. Choose exactly one label: DRINKING if a person "
-    "is visibly drinking from a cup or bottle; TYPING if the person's hands "
-    "are visibly in a typing posture on a computer keyboard; UNCERTAIN if "
-    "neither is clear. Do not guess or infer that a message was sent. "
-    "Reply with only the label DRINKING, TYPING, or UNCERTAIN."
+    "Describe in one short sentence what the person is visibly doing right now. "
+    "Focus on their posture, hands, and any object they are interacting with. "
+    "If the activity is unclear, describe only what is visible. Do not guess "
+    "their intent, spoken words, or the contents of a screen."
 )
 
-TASK_LABELS = {"DRINKING", "TYPING", "UNCERTAIN"}
 
-
-def parse_task(response: str) -> str:
-    """Accept only an unambiguous label; retain unexpected answers in the log."""
-    label = response.strip().upper().rstrip(".! ")
-    return label if label in TASK_LABELS else "UNCERTAIN"
+def parse_observation(response: str) -> str:
+    """Keep the model's open-ended wording, with a fallback for empty output."""
+    return " ".join(response.split()) or "No description returned"
 
 
 class TaskDemoEngine:
-    """Apply the existing gate and classify only its baseline and events."""
+    """Apply the existing gate and describe only its baseline and events."""
 
     def __init__(self, model: Any, threshold: float) -> None:
         self.model = model
@@ -75,10 +71,11 @@ class TaskDemoEngine:
             # The gate still chooses the region; the VLM sees the full frame so
             # that the keyboard or cup is not lost in a person-only mask.
             self.vlm_calls += 1
-            response = self.model.describe(images["full"], TASK_QUESTION, max_new_tokens=16)
-            task = parse_task(response)
-            if task != self.task:
-                self.timeline.append({"time_seconds": captured_at, "task": task})
+            response = self.model.describe(images["full"], TASK_QUESTION, max_new_tokens=48)
+            task = parse_observation(response)
+            # Record every observation. Different wording does not necessarily
+            # mean the person's activity changed.
+            self.timeline.append({"time_seconds": captured_at, "task": task})
             self.task, self.answer_time, self.last_raw = task, captured_at, response
             record["inference"] = {"image": "full", "raw_response": response, "task": task}
         return record, self.snapshot()
@@ -164,6 +161,42 @@ class LatestFrameWorker:
         self._thread.join()
 
 
+def wrap_display_text(cv2: Any, value: str, max_width: int, scale: float, max_lines: int) -> list[str]:
+    """Wrap text to actual panel width; the complete response stays in the log."""
+    value = " ".join(value.split()).encode("ascii", "replace").decode("ascii")
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    def fits(text: str) -> bool:
+        return cv2.getTextSize(text, font, scale, 1)[0][0] <= max_width
+
+    lines: list[str] = []
+    line = ""
+    for word in value.split():
+        proposed = f"{line} {word}".strip()
+        if fits(proposed):
+            line = proposed
+            continue
+        if line:
+            lines.append(line)
+            line = ""
+        while word and not fits(word):
+            end = len(word)
+            while end > 1 and not fits(word[:end]):
+                end -= 1
+            lines.append(word[:end])
+            word = word[end:]
+        line = word
+    if line:
+        lines.append(line)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and not fits(last + "..."):
+            last = last[:-1]
+        lines[-1] = last.rstrip() + "..."
+    return lines
+
+
 def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed: float) -> np.ndarray:
     """Draw a small dashboard around the actual camera image."""
     height, video_width, panel_width = 600, 800, 480
@@ -185,25 +218,29 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         cv2.putText(canvas, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
     text("EVENT-TRIGGERED TASK DEMO", 34, accent, 0.58)
-    text("LAST MODEL OBSERVATION", 70, muted, 0.45)
-    text(state["task"] or "Waiting for first observation", 102, white, 0.76)
+    text("LAST MODEL OBSERVATION", 67, muted, 0.45)
+    description = state["task"] or "Waiting for first observation"
+    for index, line in enumerate(wrap_display_text(cv2, description, 430, 0.57, 3)):
+        text(line, 96 + index * 23, white, 0.57)
     if state["answer_time"] is not None:
-        text(f"Image captured at {state['answer_time']:.1f}s  |  age {max(0, elapsed - state['answer_time']):.1f}s", 126, muted)
+        text(f"Image captured at {state['answer_time']:.1f}s  |  age {max(0, elapsed - state['answer_time']):.1f}s", 170, muted)
     else:
-        text("Model is preparing the first observation", 126, muted)
-    text("Inference running" if state["busy"] else "Waiting for next sample", 156, accent)
-    text(f"Samples: {state['samples']}   Triggers: {state['triggers']}   VLM calls: {state['vlm_calls']}", 190)
-    text(f"Stale queued samples replaced: {state['dropped']}", 213, muted, 0.46)
+        text("Model is preparing the first observation", 170, muted)
+    text("Inference running" if state["busy"] else "Waiting for next sample", 196, accent)
+    text(f"Samples: {state['samples']}   Triggers: {state['triggers']}   VLM calls: {state['vlm_calls']}", 221)
+    text(f"Stale queued samples replaced: {state['dropped']}", 244, muted, 0.46)
     if state["last_trigger"] is not None:
-        text(f"Last trigger: {state['last_trigger']} at {state['last_trigger_time']:.1f}s", 247)
+        text(f"Last trigger: {state['last_trigger']} at {state['last_trigger_time']:.1f}s", 269)
     else:
-        text("Last trigger: none", 247, muted)
+        text("Last trigger: none", 269, muted)
     distances = state["last_distances"]
     if distances:
-        text(f"CLIP distances  person {distances['person']:.3f}  background {distances['background']:.3f}", 272, muted, 0.45)
-    text("OBSERVED LABEL CHANGES", 320, accent, 0.52)
-    for index, event in enumerate(state["timeline"][-6:]):
-        text(f"{event['time_seconds']:6.1f}s   {event['task']}", 350 + index * 27)
+        text(f"CLIP distances  person {distances['person']:.3f}  background {distances['background']:.3f}", 294, muted, 0.45)
+    text("RECENT MODEL OBSERVATIONS", 329, accent, 0.52)
+    for index, event in enumerate(state["timeline"][-4:]):
+        entry = f"{event['time_seconds']:5.1f}s  {event['task']}"
+        for line_index, line in enumerate(wrap_display_text(cv2, entry, 430, 0.44, 2)):
+            text(line, 354 + index * 43 + line_index * 17, white, 0.44)
     text("Single frames can be ambiguous.", 548, muted, 0.45)
     text("Q or Esc: quit", 578, muted, 0.45)
     return canvas
@@ -261,7 +298,7 @@ def run_demo(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Show event-triggered task observations from a webcam")
+    parser = argparse.ArgumentParser(description="Show open-ended event-triggered observations from a webcam")
     parser.add_argument("--camera", type=int, default=0, help="Webcam index (default: 0)")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--threshold", type=float, default=0.1, help="Gate cosine-distance threshold")

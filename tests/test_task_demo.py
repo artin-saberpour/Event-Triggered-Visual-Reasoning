@@ -9,7 +9,10 @@ from unittest.mock import patch
 
 import numpy as np
 
-from vision_events.task_demo import LatestFrameWorker, TaskDemoEngine, parse_task, render_dashboard, run_demo
+from vision_events.task_demo import (
+    LatestFrameWorker, TaskDemoEngine, parse_observation, render_dashboard, run_demo,
+    wrap_display_text,
+)
 
 
 class FakeModel:
@@ -34,13 +37,13 @@ def frame(index):
 
 class TaskDemoTests(unittest.TestCase):
     def test_gate_controls_real_model_calls_and_timeline_follows_model_output(self):
-        model = FakeModel(["TYPING", "DRINKING", "I cannot tell"])
+        model = FakeModel(["Typing on a keyboard.", "Holding a phone to their ear.", "I cannot tell."])
         engine = TaskDemoEngine(model, threshold=0.1)
 
         baseline, state = engine.process(frame(0), 0.0)
         self.assertTrue(baseline["baseline"])
         self.assertIsNone(baseline["trigger_region"])
-        self.assertEqual(state["task"], "TYPING")
+        self.assertEqual(state["task"], "Typing on a keyboard.")
 
         unchanged, state = engine.process(frame(0), 1.0)
         self.assertIsNone(unchanged["inference"])
@@ -48,21 +51,30 @@ class TaskDemoTests(unittest.TestCase):
 
         changed, state = engine.process(frame(1), 2.0)
         self.assertEqual(changed["trigger_region"], "person")
-        self.assertEqual(changed["inference"]["task"], "DRINKING")
+        self.assertEqual(changed["inference"]["task"], "Holding a phone to their ear.")
         self.assertEqual(changed["inference"]["image"], "full")
         self.assertEqual(state["triggers"], 1)
 
         unknown, state = engine.process(frame(2), 3.0)
-        self.assertEqual(unknown["inference"]["raw_response"], "I cannot tell")
-        self.assertEqual(state["task"], "UNCERTAIN")
-        self.assertEqual([item["task"] for item in state["timeline"]], ["TYPING", "DRINKING", "UNCERTAIN"])
+        self.assertEqual(unknown["inference"]["raw_response"], "I cannot tell.")
+        self.assertEqual(state["task"], "I cannot tell.")
+        self.assertEqual([item["task"] for item in state["timeline"]], [
+            "Typing on a keyboard.", "Holding a phone to their ear.", "I cannot tell."
+        ])
         self.assertEqual(model.queried_images, ["full-0", "full-1", "full-2"])
         self.assertEqual((state["samples"], state["triggers"], state["vlm_calls"]), (4, 2, 3))
 
-    def test_unknown_or_extra_model_text_does_not_become_a_confident_label(self):
-        self.assertEqual(parse_task(" typing. \n"), "TYPING")
-        for response in ("", "DRINKING or TYPING", "The person is drinking", "not typing"):
-            self.assertEqual(parse_task(response), "UNCERTAIN")
+    def test_open_ended_descriptions_and_uncertainty_are_retained(self):
+        for response in ("Petting a dog.", "Holding a book.", "I cannot see the person's activity."):
+            self.assertEqual(parse_observation(response), response)
+        self.assertEqual(parse_observation("  Looking\n at a phone. "), "Looking at a phone.")
+        self.assertEqual(parse_observation(" \n "), "No description returned")
+
+    def test_repeated_observations_are_not_treated_as_verified_task_changes(self):
+        engine = TaskDemoEngine(FakeModel(["Holding a phone.", "Holding a phone."]), 0.1)
+        engine.process(frame(0), 0.0)
+        _, state = engine.process(frame(1), 1.0)
+        self.assertEqual([item["task"] for item in state["timeline"]], ["Holding a phone."] * 2)
 
     def test_worker_replaces_stale_frames_while_inference_is_busy(self):
         class BlockingEngine:
@@ -115,18 +127,28 @@ class TaskDemoTests(unittest.TestCase):
             def rectangle(*args):
                 pass
 
+            @staticmethod
+            def getTextSize(value, font, scale, thickness):
+                return ((len(value) * 9, 12), 2)
+
             @classmethod
             def putText(cls, image, value, *args):
                 cls.lines.append(value)
 
-        engine = TaskDemoEngine(FakeModel(["TYPING"]), 0.1)
+        engine = TaskDemoEngine(FakeModel(["Holding a phone to their ear."]), 0.1)
         _, state = engine.process(frame(0), 2.0)
         state.update(busy=False, dropped=0, error=None)
         dashboard = render_dashboard(FakeCV2, frame(0), state, 5.0)
         self.assertEqual(dashboard.shape, (600, 1280, 3))
-        self.assertIn("TYPING", FakeCV2.lines)
+        self.assertIn("Holding a phone to their ear.", FakeCV2.lines)
+        self.assertIn("RECENT MODEL OBSERVATIONS", FakeCV2.lines)
         self.assertTrue(any("age 3.0s" in line for line in FakeCV2.lines))
         self.assertTrue(any("Samples: 1   Triggers: 0   VLM calls: 1" in line for line in FakeCV2.lines))
+
+        wrapped = wrap_display_text(FakeCV2, "A very long open ended description " * 8, 120, 0.5, 2)
+        self.assertEqual(len(wrapped), 2)
+        self.assertTrue(wrapped[-1].endswith("..."))
+        self.assertTrue(all(len(line) * 9 <= 120 for line in wrapped))
 
     def test_camera_loop_initializes_inference_and_cleans_up(self):
         class Camera:
@@ -155,7 +177,7 @@ class TaskDemoTests(unittest.TestCase):
             def close(self):
                 self.closed = True
 
-        model = DemoModel(["DRINKING"])
+        model = DemoModel(["Drinking from a cup."])
 
         class FakeCV2:
             FONT_HERSHEY_SIMPLEX = LINE_AA = 0
@@ -172,6 +194,10 @@ class TaskDemoTests(unittest.TestCase):
             @staticmethod
             def rectangle(*args):
                 pass
+
+            @staticmethod
+            def getTextSize(value, font, scale, thickness):
+                return ((len(value) * 9, 12), 2)
 
             @staticmethod
             def putText(*args):
@@ -199,7 +225,7 @@ class TaskDemoTests(unittest.TestCase):
                     patch("vision_events.models.VisionModels", return_value=model):
                 run_demo(args)
             records = [json.loads(line) for line in log_path.read_text().splitlines()]
-        self.assertEqual(records[0]["inference"]["task"], "DRINKING")
+        self.assertEqual(records[0]["inference"]["task"], "Drinking from a cup.")
         self.assertTrue(camera.released)
         self.assertTrue(model.closed)
         self.assertTrue(FakeCV2.destroyed)
