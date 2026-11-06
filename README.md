@@ -79,7 +79,7 @@ Choose a new output path for each run. Images and results stay local unless you 
 
 ## Live task-change demo
 
-This webcam demo shows the live camera and open-ended descriptions of the person's visible activity. The model is not restricted to a fixed set of labels: it may describe drinking, typing, using a phone, or another activity. Each description is the model's actual response to one image, not a verified label or a scripted sequence.
+This webcam demo shows the live camera and open-ended descriptions of the person's visible activity. It can reuse a description from a session-local CLIP memory when a later frame appears to match it; otherwise it calls LLaVA. There is no fixed list of activities. Cached descriptions are prior model outputs, not verified labels.
 
 With the model dependencies installed as described below, start from the repository root:
 
@@ -87,11 +87,21 @@ With the model dependencies installed as described below, start from the reposit
 python -m vision_events.task_demo --camera 0 --device cuda --log outputs\task-demo\events.jsonl
 ```
 
-The first run downloads CLIP and LLaVA weights. LLaVA 1.5 7B needs substantial disk space and GPU memory; `--device cpu` is available but may be very slow. Use `--camera 1` if a different webcam is needed. Press **Q** or **Esc** to quit. The optional JSONL log contains the actual gate decisions, distances and VLM responses, but no images. It must be a new path, so change the filename for each run.
+The first run downloads CLIP and LLaVA weights. LLaVA 1.5 7B needs substantial disk space and GPU memory; `--device cpu` is available but may be very slow. Use `--camera 1` if a different webcam is needed. Press **Q** or **Esc** to quit. The optional JSONL log contains gate decisions, cache scores, sources, timing and actual VLM responses, but no images. It must be a new path, so change the filename for each run.
 
-Place the webcam so the person's face, hands, and relevant objects are visible together. After the first observation, try holding a cup, using a keyboard, or holding a phone. Keep each action visible for a few seconds. The baseline is described once; after that the VLM is called only when the existing gate triggers. The gate reports the changed region, while the VLM receives the full frame so objects needed to interpret the activity are visible. The dashboard shows processed samples, gate triggers, VLM calls, and the capture time and age of the latest observation. It lists recent responses, not verified task changes: different words can describe the same activity. Inference runs in the background and replaces queued stale frames when it cannot keep up. To share the demo, record the dashboard with a screen recorder.
+Place the webcam so the person's face, hands, and relevant objects are visible together. After the first observation, try holding a cup, using a keyboard, or holding a phone. Keep each action visible for a few seconds; once at least two different descriptions have been stored, return to an earlier activity and watch for `Source: CLIP CACHE`.
 
-This is a single-image prototype, not verified action recognition. The VLM has no audio or video memory and cannot tell what someone says or verify a message was sent. Texting may be indistinguishable from other phone use in a still frame. A model can be wrong, the segmentation or gate can miss a change, and an old description may remain visible after the scene changes. If the trigger count does not increase during a change, try a lower threshold such as `--threshold 0.05`; this may cause more triggers and VLM calls. Test the sequence with the actual camera before presenting it. This open-ended version has not been evaluated on real recordings here.
+The baseline always calls LLaVA. After a visual trigger, the demo compares the full-frame CLIP embedding with the stored text embeddings. It reuses the best description only when there are at least two distinct candidates, the best cosine similarity is at least `--min-similarity` (default `0.30`), and the gap to the second is at least `--min-margin` (default `0.04`). Otherwise LLaVA describes the full frame, and its nonempty response is added to memory unless it contains certain explicit uncertainty phrases. Memory exists only for the current process; it starts empty on the next run.
+
+The similarity and margin defaults are **unvalidated starting points**, not calibrated confidence scores. A novel activity can still be matched incorrectly; the simple uncertainty-phrase filter can also miss uncertain responses. The dashboard identifies the source as `VLM` or `CLIP CACHE`, shows trigger/call/reuse counts and match scores, and lists recent contexts with `[V]` and `[C]` markers. The displayed resolution time is wall-clock time after the gate, not end-to-end camera-to-display latency. Inference runs in the background and replaces queued stale frames when it cannot keep up. To share the demo, record the dashboard with a screen recorder.
+
+For a comparison that calls LLaVA for every triggered event, start a separate run with:
+
+```powershell
+python -m vision_events.task_demo --camera 0 --device cuda --mode vlm
+```
+
+This is a single-image prototype, not verified action recognition. The VLM has no audio or video memory and cannot tell what someone says or verify a message was sent. Texting may be indistinguishable from other phone use in a still frame. A model can be wrong, the segmentation or gate can miss a change, and an old description may remain visible after the scene changes. If the trigger count does not increase during a change, try a lower threshold such as `--threshold 0.05`; this may cause more triggers and VLM calls. Compare the hybrid with `--mode vlm` and check the real outputs before presenting it. This hybrid version has not been evaluated with real models and a webcam here.
 
 ## Try a camera or video
 

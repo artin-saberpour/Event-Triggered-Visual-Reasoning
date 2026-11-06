@@ -1,4 +1,4 @@
-"""Live, event-triggered webcam demo with open-ended descriptions.
+"""Live webcam demo with open-ended descriptions and CLIP context memory.
 
 The gate detects visual changes; the VLM describes individual still frames.
 Its descriptions are not proof of a completed action or a person's intent.
@@ -17,6 +17,7 @@ from typing import Any, TextIO
 
 import numpy as np
 
+from .context_memory import ContextMemory
 from .gate import RegionGate
 
 
@@ -33,26 +34,51 @@ def parse_observation(response: str) -> str:
     return " ".join(response.split()) or "No description returned"
 
 
-class TaskDemoEngine:
-    """Apply the existing gate and describe only its baseline and events."""
+def cacheable_description(response: str) -> bool:
+    """Avoid caching empty and some explicitly uncertain responses.
 
-    def __init__(self, model: Any, threshold: float) -> None:
+    This is a small heuristic, not a reliable model-confidence estimator.
+    """
+    normalized = " ".join(response.lower().split())
+    if not normalized:
+        return False
+    uncertain = ("cannot tell", "can't tell", "cannot determine", "can't determine",
+                 "unable to determine", "unable to tell", "cannot see", "can't see",
+                 "not sure", "unclear")
+    return not any(phrase in normalized for phrase in uncertain)
+
+
+class TaskDemoEngine:
+    """Resolve gate events through session memory or a fresh VLM response."""
+
+    def __init__(self, model: Any, threshold: float, mode: str = "hybrid",
+                 min_similarity: float = 0.30, min_margin: float = 0.04) -> None:
+        if mode not in ("hybrid", "vlm"):
+            raise ValueError("mode must be hybrid or vlm")
         self.model = model
         self.gate = RegionGate(threshold)
+        self.mode = mode
+        self.memory = ContextMemory(min_similarity, min_margin)
         self.samples = 0
         self.triggers = 0
         self.vlm_calls = 0
+        self.cache_hits = 0
         self.task: str | None = None
         self.answer_time: float | None = None
         self.last_raw: str | None = None
+        self.last_source: str | None = None
+        self.last_match: dict[str, Any] | None = None
+        self.last_resolution_ms: float | None = None
         self.last_trigger: str | None = None
         self.last_trigger_time: float | None = None
         self.last_distances: dict[str, float] = {}
         self.timeline: list[dict[str, Any]] = []
 
     def process(self, frame: np.ndarray, captured_at: float) -> tuple[dict[str, Any], dict[str, Any]]:
+        started = time.perf_counter()
         images, embeddings = self.model.encode_frame(frame)
         decision = self.gate.observe(embeddings)
+        gate_ms = (time.perf_counter() - started) * 1000
         self.samples += 1
         self.last_distances = decision.distances
         record: dict[str, Any] = {
@@ -62,22 +88,49 @@ class TaskDemoEngine:
             "trigger_region": decision.region,
             "cosine_distances": decision.distances,
             "inference": None,
+            "recognition": None,
         }
+        resolution_ms = vlm_ms = None
         if decision.baseline or decision.region is not None:
+            resolving = time.perf_counter()
             if decision.region is not None:
                 self.triggers += 1
                 self.last_trigger = decision.region
                 self.last_trigger_time = captured_at
-            # The gate still chooses the region; the VLM sees the full frame so
-            # that the keyboard or cup is not lost in a person-only mask.
-            self.vlm_calls += 1
-            response = self.model.describe(images["full"], TASK_QUESTION, max_new_tokens=48)
-            task = parse_observation(response)
-            # Record every observation. Different wording does not necessarily
-            # mean the person's activity changed.
-            self.timeline.append({"time_seconds": captured_at, "task": task})
+            match_info = None
+            task = None
+            if self.mode == "hybrid" and not decision.baseline:
+                match = self.memory.match(embeddings["full"])
+                match_info = {"best_similarity": match.best_similarity,
+                              "margin": match.margin, "reason": match.reason,
+                              "best_description": match.candidate}
+                task = match.description
+            cache_added = False
+            if task is not None:
+                source, response = "cache", None
+                self.cache_hits += 1
+            else:
+                source = "vlm"
+                self.vlm_calls += 1
+                vlm_start = time.perf_counter()
+                # Use the full frame so the object interacting with the person
+                # is not removed by a person-only mask.
+                response = self.model.describe(images["full"], TASK_QUESTION, max_new_tokens=48)
+                vlm_ms = (time.perf_counter() - vlm_start) * 1000
+                task = parse_observation(response)
+                record["inference"] = {"image": "full", "raw_response": response, "task": task}
+                if self.mode == "hybrid" and cacheable_description(response):
+                    text_embedding = self.model.encode_texts([task])[0]
+                    cache_added = self.memory.add(task, text_embedding)
+            resolution_ms = (time.perf_counter() - resolving) * 1000
+            self.timeline.append({"time_seconds": captured_at, "task": task, "source": source})
             self.task, self.answer_time, self.last_raw = task, captured_at, response
-            record["inference"] = {"image": "full", "raw_response": response, "task": task}
+            self.last_source, self.last_match = source, match_info
+            self.last_resolution_ms = resolution_ms
+            record["recognition"] = {"source": source, "description": task, "match": match_info,
+                                     "cache_added": cache_added, "cache_size": len(self.memory)}
+        record["timings_ms"] = {"gate": gate_ms, "context_resolution": resolution_ms,
+                                "vlm": vlm_ms, "total_processing": (time.perf_counter() - started) * 1000}
         return record, self.snapshot()
 
     def snapshot(self) -> dict[str, Any]:
@@ -85,9 +138,15 @@ class TaskDemoEngine:
             "samples": self.samples,
             "triggers": self.triggers,
             "vlm_calls": self.vlm_calls,
+            "cache_hits": self.cache_hits,
+            "cache_size": len(self.memory),
+            "mode": self.mode,
             "task": self.task,
             "answer_time": self.answer_time,
             "last_raw": self.last_raw,
+            "last_source": self.last_source,
+            "last_match": self.last_match,
+            "last_resolution_ms": self.last_resolution_ms,
             "last_trigger": self.last_trigger,
             "last_trigger_time": self.last_trigger_time,
             "last_distances": dict(self.last_distances),
@@ -218,7 +277,7 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         cv2.putText(canvas, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
     text("EVENT-TRIGGERED TASK DEMO", 34, accent, 0.58)
-    text("LAST MODEL OBSERVATION", 67, muted, 0.45)
+    text("LATEST CONTEXT", 67, muted, 0.45)
     description = state["task"] or "Waiting for first observation"
     for index, line in enumerate(wrap_display_text(cv2, description, 430, 0.57, 3)):
         text(line, 96 + index * 23, white, 0.57)
@@ -226,19 +285,29 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
         text(f"Image captured at {state['answer_time']:.1f}s  |  age {max(0, elapsed - state['answer_time']):.1f}s", 170, muted)
     else:
         text("Model is preparing the first observation", 170, muted)
-    text("Inference running" if state["busy"] else "Waiting for next sample", 196, accent)
-    text(f"Samples: {state['samples']}   Triggers: {state['triggers']}   VLM calls: {state['vlm_calls']}", 221)
-    text(f"Stale queued samples replaced: {state['dropped']}", 244, muted, 0.46)
-    if state["last_trigger"] is not None:
-        text(f"Last trigger: {state['last_trigger']} at {state['last_trigger_time']:.1f}s", 269)
+    source = {"vlm": "VLM", "cache": "CLIP CACHE"}.get(state["last_source"], "--")
+    status = "RUNNING" if state["busy"] else "WAITING"
+    text(f"Source: {source}   |   {status}", 196, accent)
+    text(f"Samples: {state['samples']}   Triggers: {state['triggers']}", 218)
+    text(f"VLM calls: {state['vlm_calls']}   Reuses: {state['cache_hits']}   Stored: {state['cache_size']}", 240)
+    if state["last_resolution_ms"] is not None:
+        text(f"Resolve after gate: {state['last_resolution_ms']:.0f} ms", 262, muted, 0.45)
     else:
-        text("Last trigger: none", 269, muted)
+        text("Resolve after gate: --", 262, muted, 0.45)
+    match = state["last_match"]
+    if match and match["best_similarity"] is not None:
+        gap = "--" if match["margin"] is None else f"{match['margin']:.3f}"
+        text(f"Match: {match['best_similarity']:.3f}   gap: {gap}   {match['reason']}", 284, muted, 0.45)
+    else:
+        text("Match: no comparison yet", 284, muted, 0.45)
     distances = state["last_distances"]
     if distances:
-        text(f"CLIP distances  person {distances['person']:.3f}  background {distances['background']:.3f}", 294, muted, 0.45)
-    text("RECENT MODEL OBSERVATIONS", 329, accent, 0.52)
+        last_trigger = state["last_trigger"] or "none"
+        text(f"Gate P/B: {distances['person']:.3f}/{distances['background']:.3f}   Last: {last_trigger}", 306, muted, 0.45)
+    text("RECENT CONTEXTS  [V] VLM  [C] CACHE", 329, accent, 0.47)
     for index, event in enumerate(state["timeline"][-4:]):
-        entry = f"{event['time_seconds']:5.1f}s  {event['task']}"
+        source_letter = "V" if event["source"] == "vlm" else "C"
+        entry = f"{event['time_seconds']:5.1f}s [{source_letter}]  {event['task']}"
         for line_index, line in enumerate(wrap_display_text(cv2, entry, 430, 0.44, 2)):
             text(line, 354 + index * 43 + line_index * 17, white, 0.44)
     text("Single frames can be ambiguous.", 548, muted, 0.45)
@@ -251,6 +320,7 @@ def run_demo(args: argparse.Namespace) -> None:
         raise ValueError("--sample-seconds must be positive and finite")
     # Validate the threshold before opening the camera or loading weights.
     RegionGate(args.threshold)
+    ContextMemory(args.min_similarity, args.min_margin)
     try:
         import cv2
     except ImportError as exc:
@@ -270,7 +340,9 @@ def run_demo(args: argparse.Namespace) -> None:
             log = path.open("x", encoding="utf-8")
         print("Loading segmentation, CLIP and LLaVA; model weights may need to download...", flush=True)
         model = VisionModels(device=args.device, use_vlm=True)
-        worker = LatestFrameWorker(TaskDemoEngine(model, args.threshold), log)
+        engine = TaskDemoEngine(model, args.threshold, mode=args.mode,
+                                min_similarity=args.min_similarity, min_margin=args.min_margin)
+        worker = LatestFrameWorker(engine, log)
         start = next_sample = time.monotonic()
         while True:
             ok, frame = capture.read()
@@ -303,6 +375,12 @@ def main() -> None:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--threshold", type=float, default=0.1, help="Gate cosine-distance threshold")
     parser.add_argument("--sample-seconds", type=float, default=1.0, help="Seconds between submitted camera frames")
+    parser.add_argument("--mode", choices=["hybrid", "vlm"], default="hybrid",
+                        help="Reuse CLIP memory or always call the VLM on a trigger")
+    parser.add_argument("--min-similarity", type=float, default=0.30,
+                        help="Minimum image/text cosine similarity for cache reuse (uncalibrated)")
+    parser.add_argument("--min-margin", type=float, default=0.04,
+                        help="Minimum gap between top two cache matches (uncalibrated)")
     parser.add_argument("--log", help="Optional new JSONL path for observations; no images are saved")
     args = parser.parse_args()
     try:

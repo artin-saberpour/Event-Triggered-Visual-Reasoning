@@ -30,6 +30,9 @@ class FakeModel:
         self.queried_images.append(image)
         return next(self.responses)
 
+    def encode_texts(self, descriptions):
+        return np.array([[1.0, 0.0] for _ in descriptions])
+
 
 def frame(index):
     return np.full((2, 2, 3), index, dtype=np.uint8)
@@ -38,7 +41,7 @@ def frame(index):
 class TaskDemoTests(unittest.TestCase):
     def test_gate_controls_real_model_calls_and_timeline_follows_model_output(self):
         model = FakeModel(["Typing on a keyboard.", "Holding a phone to their ear.", "I cannot tell."])
-        engine = TaskDemoEngine(model, threshold=0.1)
+        engine = TaskDemoEngine(model, threshold=0.1, mode="vlm")
 
         baseline, state = engine.process(frame(0), 0.0)
         self.assertTrue(baseline["baseline"])
@@ -71,7 +74,7 @@ class TaskDemoTests(unittest.TestCase):
         self.assertEqual(parse_observation(" \n "), "No description returned")
 
     def test_repeated_observations_are_not_treated_as_verified_task_changes(self):
-        engine = TaskDemoEngine(FakeModel(["Holding a phone.", "Holding a phone."]), 0.1)
+        engine = TaskDemoEngine(FakeModel(["Holding a phone.", "Holding a phone."]), 0.1, mode="vlm")
         engine.process(frame(0), 0.0)
         _, state = engine.process(frame(1), 1.0)
         self.assertEqual([item["task"] for item in state["timeline"]], ["Holding a phone."] * 2)
@@ -141,9 +144,19 @@ class TaskDemoTests(unittest.TestCase):
         dashboard = render_dashboard(FakeCV2, frame(0), state, 5.0)
         self.assertEqual(dashboard.shape, (600, 1280, 3))
         self.assertIn("Holding a phone to their ear.", FakeCV2.lines)
-        self.assertIn("RECENT MODEL OBSERVATIONS", FakeCV2.lines)
+        self.assertIn("RECENT CONTEXTS  [V] VLM  [C] CACHE", FakeCV2.lines)
         self.assertTrue(any("age 3.0s" in line for line in FakeCV2.lines))
-        self.assertTrue(any("Samples: 1   Triggers: 0   VLM calls: 1" in line for line in FakeCV2.lines))
+        self.assertTrue(any("Samples: 1   Triggers: 0" in line for line in FakeCV2.lines))
+        self.assertTrue(any("VLM calls: 1   Reuses: 0   Stored: 1" in line for line in FakeCV2.lines))
+
+        FakeCV2.lines.clear()
+        state.update(last_source="cache", cache_hits=1, cache_size=2, last_resolution_ms=0.7,
+                     last_match={"best_similarity": 0.38, "margin": 0.08, "reason": "matched"},
+                     timeline=[{"time_seconds": 2.0, "task": "Holding a phone.", "source": "cache"}])
+        render_dashboard(FakeCV2, frame(0), state, 5.0)
+        self.assertTrue(any("Source: CLIP CACHE" in line for line in FakeCV2.lines))
+        self.assertTrue(any("Match: 0.380   gap: 0.080   matched" in line for line in FakeCV2.lines))
+        self.assertTrue(any("[C]" in line for line in FakeCV2.lines))
 
         wrapped = wrap_display_text(FakeCV2, "A very long open ended description " * 8, 120, 0.5, 2)
         self.assertEqual(len(wrapped), 2)
@@ -220,7 +233,8 @@ class TaskDemoTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             log_path = Path(temp) / "events.jsonl"
             args = SimpleNamespace(sample_seconds=1.0, threshold=0.1, camera=0,
-                                   log=str(log_path), device="cpu")
+                                   log=str(log_path), device="cpu", mode="hybrid",
+                                   min_similarity=0.30, min_margin=0.04)
             with patch.dict("sys.modules", {"cv2": FakeCV2}), \
                     patch("vision_events.models.VisionModels", return_value=model):
                 run_demo(args)
