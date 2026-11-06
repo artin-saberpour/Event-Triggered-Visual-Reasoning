@@ -77,6 +77,22 @@ python scripts\record_captures.py --frames path\to\captures --output outputs\cap
 
 Choose a new output path for each run. Images and results stay local unless you choose to share them. In addition to automated tests with a fake model, the capture-report path was run on four real desk images; one sample is shown above.
 
+## Live task-change demo
+
+This webcam demo shows the live camera, the latest model label and a timeline of label changes. It is designed for a short sequence such as drinking from a cup and then typing a message on a computer. The labels are `DRINKING`, `TYPING`, and `UNCERTAIN`; no sequence is scripted. A camera view cannot establish that a message was actually sent.
+
+With the model dependencies installed as described below, start from the repository root:
+
+```powershell
+python -m vision_events.task_demo --camera 0 --device cuda --log outputs\task-demo\events.jsonl
+```
+
+The first run downloads CLIP and LLaVA weights. LLaVA 1.5 7B needs substantial disk space and GPU memory; `--device cpu` is available but may be very slow. Use `--camera 1` if a different webcam is needed. Press **Q** or **Esc** to quit. The optional JSONL log contains the actual gate decisions, distances and VLM responses, but no images. It must be a new path, so change the filename for each run.
+
+Place the webcam so the person's face, cup, hands and keyboard are visible together. After the model has loaded and the first observation appears, drink from the cup, pause, and then type. Keep each action visible for a few seconds. The baseline is classified once; after that the VLM is called only when the existing gate triggers. The gate reports the changed region, while the task classifier receives the full frame so objects needed to interpret the action are visible. The dashboard shows processed samples, gate triggers, VLM calls, and the capture time and age of the latest observation. Inference runs in the background and replaces queued stale frames when it cannot keep up. To share the demo, record the dashboard with a screen recorder.
+
+This is a task-specific, single-image prototype, not verified action recognition. A held cup or a hand near a keyboard may be ambiguous; a model can also be wrong, the segmentation or gate can miss a change, and a label may remain visible after the scene changes. Tune `--threshold` and `--sample-seconds` for the scene. Test the sequence with the actual camera before presenting it. The live demo and LLaVA integration have not been validated end to end in this environment.
+
 ## Try a camera or video
 
 For CUDA, first install compatible PyTorch and torchvision builds using the [official PyTorch selector](https://pytorch.org/get-started/locally/), then install the optional dependencies:
@@ -107,3 +123,4 @@ A useful next evaluation would compare event-triggered routing with regular infe
 ## Models and acknowledgments
 
 This project uses pretrained third-party components: [MediaPipe Selfie Segmentation](https://github.com/google-ai-edge/mediapipe), [CLIP](https://github.com/openai/CLIP) via [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32), and optional [LLaVA](https://github.com/haotian-liu/LLaVA) via [`llava-hf/llava-1.5-7b-hf`](https://huggingface.co/llava-hf/llava-1.5-7b-hf). Model interfaces use [Hugging Face Transformers](https://huggingface.co/docs/transformers/). Review upstream code, model, and data licenses before reuse.
+
