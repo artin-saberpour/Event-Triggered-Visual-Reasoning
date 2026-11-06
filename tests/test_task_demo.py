@@ -225,7 +225,7 @@ class TaskDemoTests(unittest.TestCase):
         self.assertIn("Person", FakeCV2.lines)
         self.assertIn("Background", FakeCV2.lines)
         self.assertIn("Threshold 0.10", FakeCV2.lines)
-        self.assertIn("Trigger / reference refresh", FakeCV2.lines)
+        self.assertIn("Trigger  |  dashed drop = reset", FakeCV2.lines)
         self.assertTrue(any(segment[2] == (207, 226, 91) and segment[3] == 2 for segment in FakeCV2.segments))
         self.assertTrue(any(segment[2] == (145, 198, 245) and segment[3] == 2 for segment in FakeCV2.segments))
         self.assertTrue(any(c[1:] == (5, (244, 243, 240), 1) for c in FakeCV2.circles))
@@ -264,7 +264,7 @@ class TaskDemoTests(unittest.TestCase):
         draw_clip_chart(FakeCV2, dashboard, gap_history, 12.0, 0.1, 0, 0, 400, 100)
         self.assertFalse(any(s[2] in ((207, 226, 91), (145, 198, 245)) and s[3] == 2
                              for s in FakeCV2.segments))
-        self.assertTrue(any(s[2] == (86, 80, 74) and s[3] == 1 for s in FakeCV2.segments))
+        self.assertTrue(any(s[2] == (135, 130, 122) and s[3] == 1 for s in FakeCV2.segments))
 
         FakeCV2.segments.clear()
         reset_history = [
@@ -275,14 +275,26 @@ class TaskDemoTests(unittest.TestCase):
         draw_clip_chart(FakeCV2, dashboard, reset_history, 4.0, 0.1, 0, 0, 400, 100)
         person_segments = [s for s in FakeCV2.segments if s[2] == (207, 226, 91) and s[3] == 2]
         background_segments = [s for s in FakeCV2.segments if s[2] == (145, 198, 245) and s[3] == 2]
-        self.assertEqual(len(person_segments), 1)
+        self.assertEqual(len(person_segments), 2)
         self.assertEqual(len(background_segments), 2)
+        self.assertEqual(person_segments[1][0], (222, 76))
+        self.assertNotEqual(background_segments[1][0], (222, 76))
 
         FakeCV2.segments.clear()
         reset_history[1]["trigger_region"] = "full"
         draw_clip_chart(FakeCV2, dashboard, reset_history, 4.0, 0.1, 0, 0, 400, 100)
         background_segments = [s for s in FakeCV2.segments if s[2] == (145, 198, 245) and s[3] == 2]
-        self.assertEqual(len(background_segments), 1)
+        self.assertEqual(len(background_segments), 2)
+        self.assertEqual(background_segments[1][0], (222, 76))
+
+        FakeCV2.segments.clear()
+        gap_after_reset = [
+            {"time_seconds": 1.0, "person": 0.12, "background": 0.01, "trigger_region": "person"},
+            {"time_seconds": 10.0, "person": 0.02, "background": 0.02, "trigger_region": None},
+        ]
+        draw_clip_chart(FakeCV2, dashboard, gap_after_reset, 12.0, 0.1, 0, 0, 400, 100)
+        self.assertFalse(any(s[2] in ((207, 226, 91), (145, 198, 245)) and s[3] == 2
+                             for s in FakeCV2.segments))
 
         FakeCV2.lines.clear()
         FakeCV2.segments.clear()

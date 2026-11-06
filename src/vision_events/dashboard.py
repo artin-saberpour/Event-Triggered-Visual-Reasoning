@@ -132,7 +132,9 @@ def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]],
     if not samples:
         text("Waiting for processed CLIP samples", left + 18, top + plot_h // 2, muted)
         return
-    # Stems mark actual trigger times; the curves remain disconnected after a reset.
+    # A triggering frame becomes its region's new reference. Its distance to
+    # that reference is exactly zero; dashed drops mark this derived reset,
+    # rather than presenting it as an extra sampled observation.
     for item in samples:
         affected = item["trigger_region"]
         if affected is not None:
@@ -140,16 +142,18 @@ def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]],
                       else [item[affected]])
             marker_x = sx(item["time_seconds"])
             marker_y = min(sy(value) for value in values)
-            cv2.line(canvas, (marker_x, min(marker_y + 6, bottom)), (marker_x, bottom),
-                     (86, 80, 74), 1, cv2.LINE_AA)
+            for cursor in range(min(marker_y + 6, bottom), bottom, 9):
+                cv2.line(canvas, (marker_x, cursor), (marker_x, min(cursor + 4, bottom)),
+                         (135, 130, 122), 1, cv2.LINE_AA)
     for region, color in (("person", person_color), ("background", background_color)):
         previous = None
         for item in samples:
             point = (sx(item["time_seconds"]), sy(item[region]))
-            # Do not connect across long gaps or a refreshed region reference.
-            if (previous is not None and item["time_seconds"] - previous[0] <= 4.0
-                    and previous[2] not in (region, "full")):
-                cv2.line(canvas, previous[1], point, color, 2, cv2.LINE_AA)
+            # Connect from the exact post-reset zero, but never across long gaps.
+            if previous is not None and item["time_seconds"] - previous[0] <= 4.0:
+                segment_start = ((previous[1][0], bottom) if previous[2] in (region, "full")
+                                 else previous[1])
+                cv2.line(canvas, segment_start, point, color, 2, cv2.LINE_AA)
             cv2.circle(canvas, point, 2, color, -1, cv2.LINE_AA)
             if item["trigger_region"] in (region, "full"):
                 cv2.circle(canvas, point, 5, white, 1, cv2.LINE_AA)
@@ -333,12 +337,12 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     text("Background", 967, 882, 0.45, amber)
     text(f"Threshold {state['gate_threshold']:.2f}", 1126, 882, 0.45, muted)
     cv2.circle(canvas, (1327, 876), 5, white, 1, cv2.LINE_AA)
-    text("Trigger / reference refresh", 1339, 882, 0.45, muted)
+    text("Trigger  |  dashed drop = reset", 1339, 882, 0.45, muted)
     draw_clip_chart(cv2, canvas, state["distance_history"], elapsed, state["gate_threshold"],
                     42, 889, 1836, 144)
 
     text("D  Expanded details", 25, 1065, 0.42, muted)
     text("Q  Quit", 190, 1065, 0.42, muted)
-    text("Line breaks: reference refreshed or samples unavailable", 410, 1065, 0.42, muted)
+    text("Dashed drops: reference reset   |   Gaps: samples unavailable", 410, 1065, 0.42, muted)
     text("Contexts are inferred from individual frames.", 1450, 1065, 0.40, muted)
     return canvas
