@@ -16,6 +16,7 @@ import time
 from typing import Any, TextIO
 
 import numpy as np
+from PIL import Image
 
 from .context_memory import ContextMemory
 from .dashboard import render_dashboard, wrap_display_text
@@ -49,6 +50,18 @@ def cacheable_description(response: str) -> bool:
     return not any(phrase in normalized for phrase in uncertain)
 
 
+def make_region_previews(images: dict[str, Any]) -> dict[str, np.ndarray]:
+    """Make small BGR previews of the actual masked views; never save frames."""
+    previews: dict[str, np.ndarray] = {}
+    for region in ("person", "background"):
+        image = images.get(region)
+        if isinstance(image, Image.Image):
+            thumbnail = image.convert("RGB")
+            thumbnail.thumbnail((256, 144), Image.Resampling.BILINEAR)
+            previews[region] = np.asarray(thumbnail)[:, :, ::-1].copy()
+    return previews
+
+
 class TaskDemoEngine:
     """Resolve gate events through session memory or a fresh VLM response."""
 
@@ -73,6 +86,8 @@ class TaskDemoEngine:
         self.last_trigger: str | None = None
         self.last_trigger_time: float | None = None
         self.last_distances: dict[str, float] = {}
+        self.region_previews: dict[str, np.ndarray] = {}
+        self.preview_time: float | None = None
         self.timeline: list[dict[str, Any]] = []
 
     def process(self, frame: np.ndarray, captured_at: float) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -80,6 +95,8 @@ class TaskDemoEngine:
         images, embeddings = self.model.encode_frame(frame)
         decision = self.gate.observe(embeddings)
         gate_ms = (time.perf_counter() - started) * 1000
+        self.region_previews = make_region_previews(images)
+        self.preview_time = captured_at
         self.samples += 1
         self.last_distances = decision.distances
         record: dict[str, Any] = {
@@ -154,6 +171,8 @@ class TaskDemoEngine:
             "last_trigger": self.last_trigger,
             "last_trigger_time": self.last_trigger_time,
             "last_distances": dict(self.last_distances),
+            "region_previews": {key: value.copy() for key, value in self.region_previews.items()},
+            "preview_time": self.preview_time,
             "timeline": copy.deepcopy(self.timeline),
         }
 
@@ -253,7 +272,7 @@ def run_demo(args: argparse.Namespace) -> None:
                                 min_similarity=args.min_similarity, min_margin=args.min_margin)
         worker = LatestFrameWorker(engine, log)
         cv2.namedWindow("Event-triggered task demo", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("Event-triggered task demo", 1152, 648)
+        cv2.resizeWindow("Event-triggered task demo", 1280, 720)
         start = next_sample = time.monotonic()
         show_details = False
         while True:

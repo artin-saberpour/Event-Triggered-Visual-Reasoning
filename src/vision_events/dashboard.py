@@ -60,14 +60,14 @@ def _clock(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+
 def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed: float,
                      show_details: bool = False) -> np.ndarray:
-    """Render the real camera, latest context and optional diagnostic details."""
-    height, width = 720, 1280
+    """Render the camera, context and all pipeline stages on the main view."""
+    height, width = 900, 1600
     background, card = (19, 17, 16), (34, 30, 27)
     white, muted = (244, 243, 240), (177, 165, 154)
-    teal = (207, 226, 91)
-    amber, divider = (145, 198, 245), (62, 56, 50)
+    teal, amber, divider = (207, 226, 91), (145, 198, 245), (62, 56, 50)
     canvas = np.full((height, width, 3), background, dtype=np.uint8)
 
     def text(value: str, x: int, y: int, scale: float = 0.5,
@@ -78,124 +78,155 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     def line(x1: int, y1: int, x2: int, y2: int) -> None:
         cv2.line(canvas, (x1, y1), (x2, y2), divider, 1, cv2.LINE_AA)
 
-    # Header: a title, actual live state and elapsed time, without metrics.
-    text("EVENT-TRIGGERED VISION", 25, 37, 0.72, white, 2)
-    text("LIVE CONTEXT DEMO", 26, 60, 0.4, muted)
-    cv2.circle(canvas, (1110, 36), 4, teal, -1, cv2.LINE_AA)
-    text("LIVE", 1121, 41, 0.46, teal)
-    text(_clock(elapsed), 1190, 41, 0.5, muted)
+    def place_view(image: np.ndarray | None, x: int, y: int, w: int, h: int) -> None:
+        canvas[y:y + h, x:x + w] = (10, 12, 16)
+        if image is None:
+            text("Awaiting frame", x + 16, y + h // 2, 0.43, muted)
+            return
+        source_height, source_width = image.shape[:2]
+        scale = min(w / source_width, h / source_height)
+        image_w = max(1, int(source_width * scale))
+        image_h = max(1, int(source_height * scale))
+        view = cv2.resize(image, (image_w, image_h))
+        x0, y0 = x + (w - image_w) // 2, y + (h - image_h) // 2
+        canvas[y0:y0 + image_h, x0:x0 + image_w] = view
 
-    # Camera panel: letterbox to preserve the actual frame's aspect ratio.
-    vx, vy, vw, vh = 24, 88, 786, 442
-    canvas[vy:vy + vh, vx:vx + vw] = (10, 12, 16)
-    source_height, source_width = frame.shape[:2]
-    scale = min(vw / source_width, vh / source_height)
-    image_w, image_h = max(1, int(source_width * scale)), max(1, int(source_height * scale))
-    view = cv2.resize(frame, (image_w, image_h))
-    x0, y0 = vx + (vw - image_w) // 2, vy + (vh - image_h) // 2
-    canvas[y0:y0 + image_h, x0:x0 + image_w] = view
-    _rounded_box(cv2, canvas, vx + 15, vy + 15, 145, 30, background, 8)
-    cv2.circle(canvas, (vx + 30, vy + 30), 4, teal, -1, cv2.LINE_AA)
-    text("LIVE CAMERA", vx + 42, vy + 35, 0.43, white)
+    text("EVENT-TRIGGERED VISUAL REASONING", 25, 38, 0.76, white, 2)
+    text("LIVE PERCEPTION DEMO", 26, 63, 0.43, muted)
+    cv2.circle(canvas, (1440, 37), 5, teal, -1, cv2.LINE_AA)
+    text("LIVE", 1454, 42, 0.48, teal)
+    text(_clock(elapsed), 1528, 42, 0.5, muted)
 
-    # A short explanation makes the trigger-and-understand concept legible.
-    _rounded_box(cv2, canvas, 24, 546, 786, 126, card)
-    text("FROM VIDEO TO CONTEXT", 45, 575, 0.43, muted)
-    last_change = state["last_trigger_time"]
-    change_label = _clock(last_change) if last_change is not None else "--"
-    text(f"LAST VISUAL CHANGE  {change_label}", 586, 575, 0.38, muted)
-    text("01", 45, 620, 0.68, teal, 2)
-    text("Live scene", 80, 620, 0.55, white)
-    text(">", 244, 620, 0.57, muted)
-    text("02", 279, 620, 0.68, teal, 2)
-    text("Visual change", 316, 620, 0.55, white)
-    text(">", 500, 620, 0.57, muted)
-    text("03", 536, 620, 0.68, teal, 2)
-    text("Context update", 574, 620, 0.55, white)
-    text("The context updates when the system notices a visual change.", 45, 650, 0.42, muted)
+    # The live camera is independent of the most recently processed frame.
+    vx, vy, vw, vh = 24, 88, 880, 495
+    place_view(frame, vx, vy, vw, vh)
+    _rounded_box(cv2, canvas, vx + 16, vy + 16, 150, 32, background, 8)
+    cv2.circle(canvas, (vx + 31, vy + 32), 4, teal, -1, cv2.LINE_AA)
+    text("LIVE CAMERA", vx + 43, vy + 37, 0.45, white)
 
-    # Current context: clearly identify if the text was generated or reused.
-    px, pw = 830, 426
-    _rounded_box(cv2, canvas, px, 88, pw, 256, card)
-    text("CURRENT CONTEXT", px + 22, 120, 0.46, muted)
+    px, pw = 924, 652
+    _rounded_box(cv2, canvas, px, 88, pw, 230, card)
+    text("CURRENT CONTEXT", px + 22, 120, 0.48, muted)
     description = state["task"] or "Waiting for the first observation"
-    for index, item in enumerate(wrap_display_text(cv2, description, 378, 0.67, 3)):
-        text(item, px + 22, 156 + index * 26, 0.67, white, 1)
+    for index, item in enumerate(wrap_display_text(cv2, description, 603, 0.70, 3)):
+        text(item, px + 22, 156 + index * 26, 0.70, white)
     line(px + 22, 239, px + pw - 22, 239)
-
     source = state["last_source"]
     if source == "vlm":
-        source_text, source_color = "GENERATED BY AI", teal
+        source_text, source_color = "GENERATED BY LLaVA", teal
     elif source == "cache":
-        source_text, source_color = "REUSED FROM MEMORY", amber
+        source_text, source_color = "REUSED FROM CLIP MEMORY", amber
     else:
         source_text, source_color = "WAITING FOR A DESCRIPTION", muted
     cv2.circle(canvas, (px + 27, 263), 4, source_color, -1, cv2.LINE_AA)
-    text(source_text, px + 40, 268, 0.42, source_color)
+    text(source_text, px + 40, 268, 0.45, source_color)
     if state["answer_time"] is not None:
         age = max(0, elapsed - state["answer_time"])
         text(f"Frame captured {age:.1f}s ago", px + 22, 296, 0.46, muted)
     else:
-        text("The first observation is being prepared", px + 22, 296, 0.42, muted)
-    if state["busy"]:
-        text("Checking the scene...", px + 22, 322, 0.42, teal)
-    else:
-        text("Watching for visual changes", px + 22, 322, 0.42, muted)
+        text("The first observation is being prepared", px + 22, 296, 0.43, muted)
+    status = "PROCESSING" if state["busy"] else "MONITORING"
+    text(status, px + 510, 296, 0.40, teal if state["busy"] else muted)
 
-    # The detail view replaces the history card, leaving camera and context in place.
-    _rounded_box(cv2, canvas, px, 360, pw, 312, card)
+    _rounded_box(cv2, canvas, px, 334, pw, 249, card)
     if show_details:
-        text("DETAILS", px + 22, 390, 0.5, white, 1)
-        text("D  BACK TO PRESENTATION", px + 213, 390, 0.35, muted)
-        line(px + 22, 402, px + pw - 22, 402)
-        distances = state["last_distances"]
-        distance_text = (f"{distances['person']:.3f} / {distances['background']:.3f}"
-                         if distances else "--")
+        text("EXPANDED DETAILS", px + 22, 365, 0.53, white)
+        text("D  BACK TO HISTORY", px + 488, 365, 0.39, muted)
+        line(px + 22, 376, px + pw - 22, 376)
         match = state["last_match"] or {}
+        candidate = match.get("best_description") or "No candidate yet"
+        text("BEST CACHED CANDIDATE", px + 22, 401, 0.42, muted)
+        for index, item in enumerate(wrap_display_text(cv2, candidate, 600, 0.48, 2)):
+            text(item, px + 22, 426 + index * 20, 0.48, white)
         best = match.get("best_similarity")
         gap = match.get("margin")
-        score_text = f"{best:.3f}" if best is not None else "--"
-        gap_text = f"{gap:.3f}" if gap is not None else "--"
-        resolve = state["last_resolution_ms"]
-        resolve_text = f"{resolve:.0f} ms" if resolve is not None else "--"
-        details = [
-            ("Samples / triggers", f"{state['samples']} / {state['triggers']}"),
-            ("Person / background distance", distance_text),
-            ("Last trigger region", state["last_trigger"] or "--"),
-            ("VLM calls / memory reuses", f"{state['vlm_calls']} / {state['cache_hits']}"),
-            ("Descriptions stored", str(state["cache_size"])),
-            ("Best similarity / gap", f"{score_text} / {gap_text}"),
-            ("Match decision", match.get("reason", "--")),
-            ("Resolve time after gate", resolve_text),
-            ("Queued frames replaced", str(state["dropped"])),
-            ("Gate / match / gap thresholds", f"{state['gate_threshold']:.2f} / {state['min_similarity']:.2f} / {state['min_margin']:.2f}"),
-        ]
-        for index, (label, value) in enumerate(details):
-            y = 424 + index * 23
-            text(label, px + 22, y, 0.42, muted)
-            text(value, px + 257, y, 0.42, white)
+        best_str = f"{best:.3f}" if best is not None else "--"
+        gap_str = f"{gap:.3f}" if gap is not None else "--"
+        text(f"Similarity: {best_str}   Gap: {gap_str}   Decision: {match.get('reason', '--')}",
+             px + 22, 491, 0.46, muted)
+        text(f"Samples: {state['samples']}   Triggers: {state['triggers']}   Queued replaced: {state['dropped']}",
+             px + 22, 522, 0.46, muted)
+        text("Timings are measured after the change gate.", px + 22, 555, 0.42, muted)
     else:
-        text("RECENT OBSERVATIONS", px + 22, 390, 0.5, white)
-        text("LATEST 3", px + 326, 390, 0.36, muted)
-        line(px + 22, 402, px + pw - 22, 402)
+        text("RECENT OBSERVATIONS", px + 22, 365, 0.53, white)
+        text("LATEST 3", px + 535, 365, 0.4, muted)
+        line(px + 22, 376, px + pw - 22, 376)
         recent = state["timeline"][-3:]
         if not recent:
-            text("Observations will appear here", px + 22, 439, 0.46, muted)
+            text("Observations will appear here", px + 22, 411, 0.48, muted)
         for index, event in enumerate(recent):
-            y = 430 + index * 57
-            text(_clock(event["time_seconds"]), px + 22, y, 0.43, white)
-            event_source = "AI" if event["source"] == "vlm" else "Memory"
+            y = 403 + index * 53
+            text(_clock(event["time_seconds"]), px + 22, y, 0.45, white)
+            event_source = "LLaVA" if event["source"] == "vlm" else "Memory"
             event_color = teal if event["source"] == "vlm" else amber
-            text(event_source, px + 22, y + 18, 0.36, event_color)
-            for line_index, item in enumerate(wrap_display_text(cv2, event["task"], 302, 0.48, 2)):
-                text(item, px + 100, y + line_index * 18, 0.48, white)
-        line(px + 22, 607, px + pw - 22, 607)
-        text("AI descriptions", px + 22, 628, 0.4, muted)
-        text(str(state["vlm_calls"]), px + 22, 655, 0.64, white, 2)
-        text("Memory reuses", px + 227, 628, 0.4, muted)
-        text(str(state["cache_hits"]), px + 227, 655, 0.64, white, 2)
+            text(event_source, px + 22, y + 19, 0.39, event_color)
+            for line_index, item in enumerate(wrap_display_text(cv2, event["task"], 510, 0.54, 2)):
+                text(item, px + 106, y + line_index * 19, 0.54, white)
 
-    text("D  Details", 25, 701, 0.4, muted)
-    text("Q  Quit", 123, 701, 0.4, muted)
-    text("Descriptions are model observations from individual frames.", 830, 701, 0.38, muted)
+    # All components and the former diagnostic measurements remain visible.
+    top, card_h, card_w = 599, 249, 504
+    left, mid, right = 24, 548, 1072
+    for x in (left, mid, right):
+        _rounded_box(cv2, canvas, x, top, card_w, card_h, card)
+
+    text("01", left + 20, 629, 0.65, teal, 2)
+    text("MediaPipe", left + 63, 629, 0.68, white, 2)
+    text("Separate person and background", left + 20, 653, 0.52, muted)
+    text("PERSON VIEW", left + 20, 678, 0.43, muted)
+    text("BACKGROUND VIEW", left + 258, 678, 0.43, muted)
+    previews = state["region_previews"]
+    place_view(previews.get("person"), left + 20, 687, 226, 127)
+    place_view(previews.get("background"), left + 258, 687, 226, 127)
+    preview_time = state["preview_time"]
+    preview_label = _clock(preview_time) if preview_time is not None else "--"
+    text(f"Sample captured at: {preview_label}", left + 20, 837, 0.43, muted)
+
+    text("02", mid + 20, 629, 0.65, teal, 2)
+    text("CLIP", mid + 63, 629, 0.68, white, 2)
+    text("Detect visual change and match memory", mid + 20, 653, 0.52, muted)
+    distances = state["last_distances"]
+    distance_text = (f"{distances['person']:.3f} / {distances['background']:.3f}"
+                     if distances else "--")
+    match = state["last_match"] or {}
+    best, gap = match.get("best_similarity"), match.get("margin")
+    best_str = f"{best:.3f}" if best is not None else "--"
+    gap_str = f"{gap:.3f}" if gap is not None else "--"
+    reasons = {"matched": "Matched", "empty": "No descriptions", "need_more_examples": "Need 2 descriptions",
+               "low_similarity": "Low similarity", "ambiguous": "Ambiguous match"}
+    reason = reasons.get(match.get("reason"), "--")
+    clip_rows = [
+        ("Samples / triggers", f"{state['samples']} / {state['triggers']}"),
+        ("Person / background distance", distance_text),
+        ("Last trigger / gate threshold", f"{state['last_trigger'] or '--'} / {state['gate_threshold']:.2f}"),
+        ("Last memory similarity / gap", f"{best_str} / {gap_str}"),
+        ("Last memory decision", reason),
+        ("Match / gap thresholds", f"{state['min_similarity']:.2f} / {state['min_margin']:.2f}"),
+    ]
+    for index, (label, value) in enumerate(clip_rows):
+        y = 682 + index * 30
+        text(label, mid + 20, y, 0.50, muted)
+        text(value, mid + 290, y, 0.50, white)
+
+    text("03", right + 20, 629, 0.65, teal, 2)
+    text("LLaVA", right + 63, 629, 0.68, white, 2)
+    text("Describe when no memory matches", right + 20, 653, 0.52, muted)
+    source_label = {"vlm": "LLaVA", "cache": "CLIP memory"}.get(source, "--")
+    resolve = state["last_resolution_ms"]
+    resolve_text = f"{resolve:.0f} ms" if resolve is not None else "--"
+    llava_rows = [
+        ("Context source", source_label),
+        ("LLaVA calls / memory reuses", f"{state['vlm_calls']} / {state['cache_hits']}"),
+        ("Descriptions stored", str(state["cache_size"])),
+        ("Resolve time after gate", resolve_text),
+        ("Queued frames replaced", str(state["dropped"])),
+        ("Mode", state["mode"].upper()),
+    ]
+    for index, (label, value) in enumerate(llava_rows):
+        y = 682 + index * 30
+        text(label, right + 20, y, 0.50, muted)
+        text(value, right + 300, y, 0.50, white)
+
+    text("D  Expanded details", 25, 882, 0.42, muted)
+    text("Q  Quit", 190, 882, 0.42, muted)
+    text("Context descriptions are inferred from individual frames.", 1105, 882, 0.40, muted)
     return canvas
