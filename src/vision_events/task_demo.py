@@ -18,6 +18,7 @@ from typing import Any, TextIO
 import numpy as np
 
 from .context_memory import ContextMemory
+from .dashboard import render_dashboard, wrap_display_text
 from .gate import RegionGate
 
 
@@ -141,6 +142,9 @@ class TaskDemoEngine:
             "cache_hits": self.cache_hits,
             "cache_size": len(self.memory),
             "mode": self.mode,
+            "gate_threshold": self.gate.threshold,
+            "min_similarity": self.memory.min_similarity,
+            "min_margin": self.memory.min_margin,
             "task": self.task,
             "answer_time": self.answer_time,
             "last_raw": self.last_raw,
@@ -220,101 +224,6 @@ class LatestFrameWorker:
         self._thread.join()
 
 
-def wrap_display_text(cv2: Any, value: str, max_width: int, scale: float, max_lines: int) -> list[str]:
-    """Wrap text to actual panel width; the complete response stays in the log."""
-    value = " ".join(value.split()).encode("ascii", "replace").decode("ascii")
-    font = cv2.FONT_HERSHEY_SIMPLEX
-
-    def fits(text: str) -> bool:
-        return cv2.getTextSize(text, font, scale, 1)[0][0] <= max_width
-
-    lines: list[str] = []
-    line = ""
-    for word in value.split():
-        proposed = f"{line} {word}".strip()
-        if fits(proposed):
-            line = proposed
-            continue
-        if line:
-            lines.append(line)
-            line = ""
-        while word and not fits(word):
-            end = len(word)
-            while end > 1 and not fits(word[:end]):
-                end -= 1
-            lines.append(word[:end])
-            word = word[end:]
-        line = word
-    if line:
-        lines.append(line)
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-        last = lines[-1]
-        while last and not fits(last + "..."):
-            last = last[:-1]
-        lines[-1] = last.rstrip() + "..."
-    return lines
-
-
-def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed: float) -> np.ndarray:
-    """Draw a small dashboard around the actual camera image."""
-    height, video_width, panel_width = 600, 800, 480
-    canvas = np.full((height, video_width + panel_width, 3), (19, 22, 28), dtype=np.uint8)
-    source_height, source_width = frame.shape[:2]
-    scale = min(video_width / source_width, height / source_height)
-    width, scaled_height = max(1, int(source_width * scale)), max(1, int(source_height * scale))
-    view = cv2.resize(frame, (width, scaled_height))
-    x0, y0 = (video_width - width) // 2, (height - scaled_height) // 2
-    canvas[y0:y0 + scaled_height, x0:x0 + width] = view
-    cv2.rectangle(canvas, (0, 0), (video_width, 40), (22, 25, 31), -1)
-    cv2.putText(canvas, f"LIVE CAMERA    {elapsed:05.1f}s", (16, 27),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.62, (245, 245, 245), 1, cv2.LINE_AA)
-
-    x = video_width + 22
-    white, muted, accent = (245, 245, 245), (180, 185, 190), (110, 215, 180)
-
-    def text(line: str, y: int, color: tuple[int, int, int] = white, scale: float = 0.5) -> None:
-        cv2.putText(canvas, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
-
-    text("EVENT-TRIGGERED TASK DEMO", 34, accent, 0.58)
-    text("LATEST CONTEXT", 67, muted, 0.45)
-    description = state["task"] or "Waiting for first observation"
-    for index, line in enumerate(wrap_display_text(cv2, description, 430, 0.57, 3)):
-        text(line, 96 + index * 23, white, 0.57)
-    if state["answer_time"] is not None:
-        text(f"Image captured at {state['answer_time']:.1f}s  |  age {max(0, elapsed - state['answer_time']):.1f}s", 170, muted)
-    else:
-        text("Model is preparing the first observation", 170, muted)
-    source = {"vlm": "VLM", "cache": "CLIP CACHE"}.get(state["last_source"], "--")
-    status = "RUNNING" if state["busy"] else "WAITING"
-    text(f"Source: {source}   |   {status}", 196, accent)
-    text(f"Samples: {state['samples']}   Triggers: {state['triggers']}", 218)
-    text(f"VLM calls: {state['vlm_calls']}   Reuses: {state['cache_hits']}   Stored: {state['cache_size']}", 240)
-    if state["last_resolution_ms"] is not None:
-        text(f"Resolve after gate: {state['last_resolution_ms']:.0f} ms", 262, muted, 0.45)
-    else:
-        text("Resolve after gate: --", 262, muted, 0.45)
-    match = state["last_match"]
-    if match and match["best_similarity"] is not None:
-        gap = "--" if match["margin"] is None else f"{match['margin']:.3f}"
-        text(f"Match: {match['best_similarity']:.3f}   gap: {gap}   {match['reason']}", 284, muted, 0.45)
-    else:
-        text("Match: no comparison yet", 284, muted, 0.45)
-    distances = state["last_distances"]
-    if distances:
-        last_trigger = state["last_trigger"] or "none"
-        text(f"Gate P/B: {distances['person']:.3f}/{distances['background']:.3f}   Last: {last_trigger}", 306, muted, 0.45)
-    text("RECENT CONTEXTS  [V] VLM  [C] CACHE", 329, accent, 0.47)
-    for index, event in enumerate(state["timeline"][-4:]):
-        source_letter = "V" if event["source"] == "vlm" else "C"
-        entry = f"{event['time_seconds']:5.1f}s [{source_letter}]  {event['task']}"
-        for line_index, line in enumerate(wrap_display_text(cv2, entry, 430, 0.44, 2)):
-            text(line, 354 + index * 43 + line_index * 17, white, 0.44)
-    text("Single frames can be ambiguous.", 548, muted, 0.45)
-    text("Q or Esc: quit", 578, muted, 0.45)
-    return canvas
-
-
 def run_demo(args: argparse.Namespace) -> None:
     if not math.isfinite(args.sample_seconds) or args.sample_seconds <= 0:
         raise ValueError("--sample-seconds must be positive and finite")
@@ -343,7 +252,10 @@ def run_demo(args: argparse.Namespace) -> None:
         engine = TaskDemoEngine(model, args.threshold, mode=args.mode,
                                 min_similarity=args.min_similarity, min_margin=args.min_margin)
         worker = LatestFrameWorker(engine, log)
+        cv2.namedWindow("Event-triggered task demo", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Event-triggered task demo", 1152, 648)
         start = next_sample = time.monotonic()
+        show_details = False
         while True:
             ok, frame = capture.read()
             if not ok:
@@ -355,9 +267,13 @@ def run_demo(args: argparse.Namespace) -> None:
             state = worker.snapshot()
             if state["error"]:
                 raise RuntimeError(f"Inference failed: {state['error']}")
-            cv2.imshow("Event-triggered task demo", render_dashboard(cv2, frame, state, now - start))
-            if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):
+            cv2.imshow("Event-triggered task demo",
+                       render_dashboard(cv2, frame, state, now - start, show_details=show_details))
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), ord("Q"), 27):
                 break
+            if key in (ord("d"), ord("D")):
+                show_details = not show_details
     finally:
         capture.release()
         if worker is not None:
