@@ -6,6 +6,16 @@ For interactive perception, sending every camera frame to a large vision-languag
 
 `Vision-language models` · `CLIP` · `MediaPipe` · `LLaVA` · `Change detection`
 
+## Live webcam demo
+
+[![Watch the live webcam demonstration on YouTube](https://i.ytimg.com/vi/rildjGtj7tQ/hqdefault.jpg)](https://youtu.be/rildjGtj7tQ)
+
+**[Watch the demo on YouTube (1:20)](https://youtu.be/rildjGtj7tQ)**
+
+In the live demo, MediaPipe separates the person and background while CLIP detects visual changes. When a change is detected, the system can reuse a previously generated description or ask LLaVA to describe the full frame.
+
+[Live demo code and setup](https://github.com/artin-saberpour/Event-Triggered-Visual-Reasoning/tree/demo/webcam-task-observations-20261106#live-task-change-demo) are available on the demo branch.
+
 ## Real-world diagnostic example
 
 The current implementation was run on four archived camera snapshots of a desk. The first image established a reference; the next three were processed in filename order using MediaPipe and CLIP with a cosine-distance threshold of **0.1**. These are separate still images, captured over several minutes, with changes in viewpoint and exposure. LLaVA was not used in this run.
