@@ -10,6 +10,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
+from vision_events.dashboard import clip_chart_window, draw_clip_chart
 from vision_events.task_demo import (
     LatestFrameWorker, TaskDemoEngine, make_region_previews, parse_observation, render_dashboard, run_demo,
     wrap_display_text,
@@ -40,6 +41,37 @@ def frame(index):
 
 
 class TaskDemoTests(unittest.TestCase):
+    def test_distance_trace_records_real_gate_values_and_reference_reset(self):
+        engine = TaskDemoEngine(FakeModel(["Typing.", "Holding a phone."]), 0.1, mode="vlm")
+        _, state = engine.process(frame(0), 0.0)
+        self.assertEqual(state["distance_history"], [])
+        unchanged, _ = engine.process(frame(0), 1.0)
+        triggered, _ = engine.process(frame(1), 2.0)
+        after_reset, state = engine.process(frame(1), 3.0)
+        history = state["distance_history"]
+        self.assertEqual([item["time_seconds"] for item in history], [1.0, 2.0, 3.0])
+        self.assertEqual([item["trigger_region"] for item in history], [None, "person", None])
+        self.assertAlmostEqual(history[0]["person"], unchanged["cosine_distances"]["person"])
+        self.assertAlmostEqual(history[1]["person"], triggered["cosine_distances"]["person"])
+        self.assertAlmostEqual(history[1]["person"], 1.0)
+        self.assertAlmostEqual(history[2]["person"], after_reset["cosine_distances"]["person"])
+        self.assertAlmostEqual(history[2]["person"], 0.0)
+        history[1]["person"] = 123.0
+        self.assertAlmostEqual(engine.snapshot()["distance_history"][1]["person"], 1.0)
+
+    def test_distance_history_is_bounded_and_chart_uses_only_recent_samples(self):
+        engine = TaskDemoEngine(FakeModel(["Typing."]), 0.1, mode="vlm")
+        engine.process(frame(0), 0.0)
+        for index in range(1, 250):
+            engine.process(frame(0), float(index))
+        history = engine.snapshot()["distance_history"]
+        self.assertEqual(len(history), 240)
+        self.assertEqual((history[0]["time_seconds"], history[-1]["time_seconds"]), (10.0, 249.0))
+        samples, start, end, upper = clip_chart_window(history, 249.0, 0.1)
+        self.assertEqual((start, end), (219.0, 249.0))
+        self.assertEqual((samples[0]["time_seconds"], samples[-1]["time_seconds"]), (219.0, 249.0))
+        self.assertAlmostEqual(upper, 0.15)
+
     def test_region_previews_preserve_actual_masks_and_do_not_enter_logs(self):
         class ImageModel(FakeModel):
             def encode_frame(self, frame):
@@ -144,6 +176,8 @@ class TaskDemoTests(unittest.TestCase):
         class FakeCV2:
             FONT_HERSHEY_SIMPLEX = LINE_AA = 0
             lines = []
+            segments = []
+            circles = []
 
             @staticmethod
             def resize(image, size):
@@ -153,13 +187,13 @@ class TaskDemoTests(unittest.TestCase):
             def rectangle(*args):
                 pass
 
-            @staticmethod
-            def circle(*args):
-                pass
+            @classmethod
+            def circle(cls, image, point, radius, color, thickness, line_type):
+                cls.circles.append((point, radius, color, thickness))
 
-            @staticmethod
-            def line(*args):
-                pass
+            @classmethod
+            def line(cls, image, start, end, color, thickness, line_type):
+                cls.segments.append((start, end, color, thickness))
 
             @staticmethod
             def getTextSize(value, font, scale, thickness):
@@ -171,7 +205,12 @@ class TaskDemoTests(unittest.TestCase):
 
         engine = TaskDemoEngine(FakeModel(["Holding a phone to their ear."]), 0.1)
         _, state = engine.process(frame(0), 2.0)
-        state.update(busy=False, dropped=0, error=None)
+        state.update(busy=False, dropped=0, error=None,
+                     last_distances={"person": 0.12, "background": 0.02},
+                     distance_history=[
+                         {"time_seconds": 3.0, "person": 0.02, "background": 0.01, "trigger_region": None},
+                         {"time_seconds": 4.0, "person": 0.12, "background": 0.02, "trigger_region": "person"},
+                     ])
         dashboard = render_dashboard(FakeCV2, frame(0), state, 5.0)
         self.assertEqual(dashboard.shape, (900, 1600, 3))
         self.assertIn("Holding a phone to their ear.", FakeCV2.lines)
@@ -181,9 +220,15 @@ class TaskDemoTests(unittest.TestCase):
         self.assertIn("MediaPipe", FakeCV2.lines)
         self.assertIn("CLIP", FakeCV2.lines)
         self.assertIn("LLaVA", FakeCV2.lines)
-        self.assertIn("Person / background distance", FakeCV2.lines)
+        self.assertIn("PERSON 0.120", FakeCV2.lines)
+        self.assertIn("BACKGROUND 0.020", FakeCV2.lines)
+        self.assertIn("THRESHOLD 0.10", FakeCV2.lines)
+        self.assertIn("TRIGGER", FakeCV2.lines)
+        self.assertTrue(any(segment[2] == (207, 226, 91) and segment[3] == 2 for segment in FakeCV2.segments))
+        self.assertTrue(any(segment[2] == (145, 198, 245) and segment[3] == 2 for segment in FakeCV2.segments))
+        self.assertTrue(any(c[1:] == (5, (244, 243, 240), 1) for c in FakeCV2.circles))
         self.assertIn("LLaVA calls / memory reuses", FakeCV2.lines)
-        self.assertIn("Match / gap thresholds", FakeCV2.lines)
+        self.assertTrue(any("Limits: gate" in line for line in FakeCV2.lines))
 
         FakeCV2.lines.clear()
         state.update(last_source="cache", cache_hits=1, cache_size=2, last_resolution_ms=0.7,
@@ -193,8 +238,7 @@ class TaskDemoTests(unittest.TestCase):
         render_dashboard(FakeCV2, frame(0), state, 5.0)
         self.assertIn("REUSED FROM CLIP MEMORY", FakeCV2.lines)
         self.assertIn("Memory", FakeCV2.lines)
-        self.assertIn("Last memory similarity / gap", FakeCV2.lines)
-        self.assertIn("0.380 / 0.080", FakeCV2.lines)
+        self.assertTrue(any("Memory similarity / gap  0.380 / 0.080" in line for line in FakeCV2.lines))
 
         FakeCV2.lines.clear()
         render_dashboard(FakeCV2, frame(0), state, 5.0, show_details=True)
@@ -208,6 +252,40 @@ class TaskDemoTests(unittest.TestCase):
         self.assertEqual(len(wrapped), 2)
         self.assertTrue(wrapped[-1].endswith("..."))
         self.assertTrue(all(len(line) * 9 <= 120 for line in wrapped))
+
+        FakeCV2.segments.clear()
+        gap_history = [
+            {"time_seconds": 1.0, "person": 0.02, "background": 0.01, "trigger_region": None},
+            {"time_seconds": 10.0, "person": 0.12, "background": 0.02, "trigger_region": "person"},
+        ]
+        draw_clip_chart(FakeCV2, dashboard, gap_history, 12.0, 0.1, 0, 0, 400, 100)
+        self.assertFalse(any(s[2] in ((207, 226, 91), (145, 198, 245)) and s[3] == 2
+                             for s in FakeCV2.segments))
+
+        FakeCV2.segments.clear()
+        reset_history = [
+            {"time_seconds": 1.0, "person": 0.02, "background": 0.01, "trigger_region": None},
+            {"time_seconds": 2.0, "person": 0.12, "background": 0.02, "trigger_region": "person"},
+            {"time_seconds": 3.0, "person": 0.01, "background": 0.03, "trigger_region": None},
+        ]
+        draw_clip_chart(FakeCV2, dashboard, reset_history, 4.0, 0.1, 0, 0, 400, 100)
+        person_segments = [s for s in FakeCV2.segments if s[2] == (207, 226, 91) and s[3] == 2]
+        background_segments = [s for s in FakeCV2.segments if s[2] == (145, 198, 245) and s[3] == 2]
+        self.assertEqual(len(person_segments), 1)
+        self.assertEqual(len(background_segments), 2)
+
+        FakeCV2.segments.clear()
+        reset_history[1]["trigger_region"] = "full"
+        draw_clip_chart(FakeCV2, dashboard, reset_history, 4.0, 0.1, 0, 0, 400, 100)
+        background_segments = [s for s in FakeCV2.segments if s[2] == (145, 198, 245) and s[3] == 2]
+        self.assertEqual(len(background_segments), 1)
+
+        FakeCV2.lines.clear()
+        FakeCV2.segments.clear()
+        draw_clip_chart(FakeCV2, dashboard, [], 0.0, 0.1, 0, 0, 400, 100)
+        self.assertIn("Waiting for processed CLIP samples", FakeCV2.lines)
+        self.assertFalse(any(s[2] in ((207, 226, 91), (145, 198, 245)) and s[3] == 2
+                             for s in FakeCV2.segments))
 
     def test_camera_loop_initializes_inference_and_cleans_up(self):
         class Camera:

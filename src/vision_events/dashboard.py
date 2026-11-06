@@ -60,6 +60,64 @@ def _clock(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def clip_chart_window(history: list[dict[str, Any]], elapsed: float, threshold: float,
+                      window_seconds: float = 30.0) -> tuple[list[dict[str, Any]], float, float, float]:
+    """Return visible processed samples and a cosine-distance plot range."""
+    end = max(float(elapsed), 0.001)
+    start = max(0.0, end - window_seconds)
+    samples = [item for item in history if start <= item["time_seconds"] <= end]
+    max_distance = max((max(item["person"], item["background"]) for item in samples), default=0.0)
+    upper = min(2.0, max(0.15, threshold * 1.3, max_distance * 1.1))
+    return samples, start, end, upper
+
+
+def draw_clip_chart(cv2: Any, canvas: np.ndarray, history: list[dict[str, Any]], elapsed: float,
+                    threshold: float, x: int, y: int, width: int, height: int) -> None:
+    """Plot actual gate distances, with a dashed threshold and event rings."""
+    white, muted = (244, 243, 240), (177, 165, 154)
+    person_color, background_color = (207, 226, 91), (145, 198, 245)
+    grid, threshold_color = (66, 60, 54), (155, 150, 145)
+    samples, start, end, upper = clip_chart_window(history, elapsed, threshold)
+    left, right = x + 41, x + width - 8
+    top, bottom = y + 4, y + height - 20
+    plot_w, plot_h = right - left, bottom - top
+
+    def text(value: str, tx: int, ty: int, color: tuple[int, int, int] = muted) -> None:
+        cv2.putText(canvas, value, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.34, color, 1, cv2.LINE_AA)
+
+    def sx(seconds: float) -> int:
+        return int(round(left + (seconds - start) / (end - start) * plot_w))
+
+    def sy(distance: float) -> int:
+        return int(round(bottom - min(max(distance, 0.0), upper) / upper * plot_h))
+
+    cv2.line(canvas, (left, top), (left, bottom), grid, 1, cv2.LINE_AA)
+    cv2.line(canvas, (left, bottom), (right, bottom), grid, 1, cv2.LINE_AA)
+    threshold_y = sy(threshold)
+    for cursor in range(left, right, 12):
+        cv2.line(canvas, (cursor, threshold_y), (min(cursor + 6, right), threshold_y),
+                 threshold_color, 1, cv2.LINE_AA)
+    text(f"{upper:.2f}", x + 1, top + 5)
+    text("0.00", x + 1, bottom + 4)
+    text(_clock(start), left, y + height - 3)
+    text(_clock(end), right - 37, y + height - 3)
+    if not samples:
+        text("Waiting for processed CLIP samples", left + 18, top + plot_h // 2, muted)
+        return
+    for region, color in (("person", person_color), ("background", background_color)):
+        previous = None
+        for item in samples:
+            point = (sx(item["time_seconds"]), sy(item[region]))
+            # Do not connect across long gaps or a refreshed region reference.
+            if (previous is not None and item["time_seconds"] - previous[0] <= 4.0
+                    and previous[2] not in (region, "full")):
+                cv2.line(canvas, previous[1], point, color, 2, cv2.LINE_AA)
+            cv2.circle(canvas, point, 2, color, -1, cv2.LINE_AA)
+            if item["trigger_region"] in (region, "full"):
+                cv2.circle(canvas, point, 5, white, 1, cv2.LINE_AA)
+            previous = (item["time_seconds"], point, item["trigger_region"])
+
+
 
 def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed: float,
                      show_details: bool = False) -> np.ndarray:
@@ -164,29 +222,37 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
                 text(item, px + 106, y + line_index * 19, 0.54, white)
 
     # All components and the former diagnostic measurements remain visible.
-    top, card_h, card_w = 599, 249, 504
-    left, mid, right = 24, 548, 1072
-    for x in (left, mid, right):
-        _rounded_box(cv2, canvas, x, top, card_w, card_h, card)
+    top, card_h = 599, 249
+    left, mid, right = 24, 484, 1132
+    left_w, mid_w, right_w = 440, 628, 444
+    for x, panel_width in ((left, left_w), (mid, mid_w), (right, right_w)):
+        _rounded_box(cv2, canvas, x, top, panel_width, card_h, card)
 
     text("01", left + 20, 629, 0.65, teal, 2)
     text("MediaPipe", left + 63, 629, 0.68, white, 2)
     text("Separate person and background", left + 20, 653, 0.52, muted)
     text("PERSON VIEW", left + 20, 678, 0.43, muted)
-    text("BACKGROUND VIEW", left + 258, 678, 0.43, muted)
+    text("BACKGROUND VIEW", left + 225, 678, 0.43, muted)
     previews = state["region_previews"]
-    place_view(previews.get("person"), left + 20, 687, 226, 127)
-    place_view(previews.get("background"), left + 258, 687, 226, 127)
+    place_view(previews.get("person"), left + 20, 687, 195, 127)
+    place_view(previews.get("background"), left + 225, 687, 195, 127)
     preview_time = state["preview_time"]
     preview_label = _clock(preview_time) if preview_time is not None else "--"
     text(f"Sample captured at: {preview_label}", left + 20, 837, 0.43, muted)
 
     text("02", mid + 20, 629, 0.65, teal, 2)
     text("CLIP", mid + 63, 629, 0.68, white, 2)
-    text("Detect visual change and match memory", mid + 20, 653, 0.52, muted)
+    text("DISTANCE FROM REGION REFERENCE  |  30s", mid + 170, 629, 0.40, muted)
     distances = state["last_distances"]
-    distance_text = (f"{distances['person']:.3f} / {distances['background']:.3f}"
-                     if distances else "--")
+    person_value = f"{distances['person']:.3f}" if distances else "--"
+    background_value = f"{distances['background']:.3f}" if distances else "--"
+    text(f"PERSON {person_value}", mid + 20, 653, 0.40, teal)
+    text(f"BACKGROUND {background_value}", mid + 155, 653, 0.40, amber)
+    text(f"THRESHOLD {state['gate_threshold']:.2f}", mid + 350, 653, 0.40, muted)
+    cv2.circle(canvas, (mid + 493, 648), 5, white, 1, cv2.LINE_AA)
+    text("TRIGGER", mid + 504, 653, 0.38, muted)
+    draw_clip_chart(cv2, canvas, state["distance_history"], elapsed, state["gate_threshold"],
+                    mid + 18, 660, mid_w - 36, 124)
     match = state["last_match"] or {}
     best, gap = match.get("best_similarity"), match.get("margin")
     best_str = f"{best:.3f}" if best is not None else "--"
@@ -194,18 +260,11 @@ def render_dashboard(cv2: Any, frame: np.ndarray, state: dict[str, Any], elapsed
     reasons = {"matched": "Matched", "empty": "No descriptions", "need_more_examples": "Need 2 descriptions",
                "low_similarity": "Low similarity", "ambiguous": "Ambiguous match"}
     reason = reasons.get(match.get("reason"), "--")
-    clip_rows = [
-        ("Samples / triggers", f"{state['samples']} / {state['triggers']}"),
-        ("Person / background distance", distance_text),
-        ("Last trigger / gate threshold", f"{state['last_trigger'] or '--'} / {state['gate_threshold']:.2f}"),
-        ("Last memory similarity / gap", f"{best_str} / {gap_str}"),
-        ("Last memory decision", reason),
-        ("Match / gap thresholds", f"{state['min_similarity']:.2f} / {state['min_margin']:.2f}"),
-    ]
-    for index, (label, value) in enumerate(clip_rows):
-        y = 682 + index * 30
-        text(label, mid + 20, y, 0.50, muted)
-        text(value, mid + 290, y, 0.50, white)
+    text(f"Samples {state['samples']}   Triggers {state['triggers']}   Last {state['last_trigger'] or '--'}",
+         mid + 20, 800, 0.43, muted)
+    text(f"Memory similarity / gap  {best_str} / {gap_str}    {reason}", mid + 20, 818, 0.43, muted)
+    text(f"Limits: gate {state['gate_threshold']:.2f}   match {state['min_similarity']:.2f}   gap {state['min_margin']:.2f}",
+         mid + 20, 836, 0.43, muted)
 
     text("03", right + 20, 629, 0.65, teal, 2)
     text("LLaVA", right + 63, 629, 0.68, white, 2)

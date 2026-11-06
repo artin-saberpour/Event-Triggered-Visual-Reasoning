@@ -7,6 +7,7 @@ Its descriptions are not proof of a completed action or a person's intent.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import copy
 import json
 import math
@@ -86,6 +87,7 @@ class TaskDemoEngine:
         self.last_trigger: str | None = None
         self.last_trigger_time: float | None = None
         self.last_distances: dict[str, float] = {}
+        self.distance_history: deque[dict[str, Any]] = deque(maxlen=240)
         self.region_previews: dict[str, np.ndarray] = {}
         self.preview_time: float | None = None
         self.timeline: list[dict[str, Any]] = []
@@ -99,6 +101,13 @@ class TaskDemoEngine:
         self.preview_time = captured_at
         self.samples += 1
         self.last_distances = decision.distances
+        if decision.distances:
+            self.distance_history.append({
+                "time_seconds": captured_at,
+                "person": decision.distances["person"],
+                "background": decision.distances["background"],
+                "trigger_region": decision.region,
+            })
         record: dict[str, Any] = {
             "sample": self.samples,
             "captured_at_seconds": captured_at,
@@ -171,6 +180,7 @@ class TaskDemoEngine:
             "last_trigger": self.last_trigger,
             "last_trigger_time": self.last_trigger_time,
             "last_distances": dict(self.last_distances),
+            "distance_history": copy.deepcopy(list(self.distance_history)),
             "region_previews": {key: value.copy() for key, value in self.region_previews.items()},
             "preview_time": self.preview_time,
             "timeline": copy.deepcopy(self.timeline),
