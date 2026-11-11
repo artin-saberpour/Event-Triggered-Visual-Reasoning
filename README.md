@@ -1,135 +1,128 @@
 # Event-Triggered Visual Reasoning
 
-**Use visual change to decide when to update an open-ended scene description.**
+**Update visual descriptions when the scene changes, and reuse earlier descriptions when the context returns.**
 
-This prototype combines MediaPipe person/background segmentation, CLIP visual embeddings and LLaVA. The live webcam demo uses detected changes to decide when to reuse a previous description or generate a new one.
+Event-Triggered Visual Reasoning is an experimental pipeline for maintaining an open-ended description of a webcam scene without running a vision-language model (VLM) on every sampled frame. It combines region-aware visual change detection with a small, session-local memory of previous VLM descriptions.
 
-`Vision-language models` · `CLIP` · `MediaPipe` · `LLaVA` · `Change detection`
+The current interactive demo uses **MediaPipe**, **CLIP**, and **LLaVA 1.5**. It focuses on visible human activities and interactions with nearby objects, rather than classification into a predefined set of actions.
 
-## Live webcam demo
+## Demo
 
-[![Watch the live webcam demonstration on YouTube](https://i.ytimg.com/vi/rildjGtj7tQ/hqdefault.jpg)](https://youtu.be/rildjGtj7tQ)
+[![Watch the webcam demonstration](https://i.ytimg.com/vi/rildjGtj7tQ/hqdefault.jpg)](https://youtu.be/rildjGtj7tQ)
 
-**[Watch the demo on YouTube (1:20)](https://youtu.be/rildjGtj7tQ)**
+[Watch the 1:20 webcam demo](https://youtu.be/rildjGtj7tQ)
 
-The webcam interface shows the live image, person/background masks, CLIP distances and triggers, LLaVA descriptions, and memory reuse.
+The interface displays the camera feed, person/background segmentation, CLIP change scores, the latest description, and whether it came from LLaVA or session memory.
 
-1. **Start with a description.** LLaVA describes the first frame and eligible descriptions are stored for the current session.
-2. **Watch for visual change.** MediaPipe separates person and background views. CLIP compares each view with its stored reference and triggers when a distance exceeds the threshold.
-3. **Check session memory.** On a trigger, CLIP compares the full-frame image embedding with stored description embeddings. A sufficiently distinct match is reused.
-4. **Describe a new frame.** If there is no suitable match, LLaVA describes the full frame and the result can be stored for later.
+## How it works
 
-Descriptions are open-ended; there is no predefined list of activities. Memory is cleared between runs. The default gate threshold is `0.10`; reuse requires at least two distinct descriptions, similarity of at least `0.30` and a margin of at least `0.04`. These thresholds are uncalibrated starting points.
+```text
+Webcam frame
+     |
+MediaPipe person/background segmentation
+     |
+CLIP embeddings + region-specific change gate
+     |
+     +-- No change --> Keep the current description
+     |
+     +-- Change ----> CLIP image-to-text memory lookup
+                            |
+                            +-- Clear match --> Reuse a previous description
+                            |
+                            +-- No match ----> Ask LLaVA about the full frame
+                                                   |
+                                            Store eligible description
+```
 
-The live demo is currently on the [demo branch](https://github.com/artin-saberpour/Event-Triggered-Visual-Reasoning/tree/demo/webcam-task-observations-20261106#live-task-change-demo). After setting up the dependencies described there, run it from an existing clone with:
+1. **Detect visual change.** MediaPipe produces person and background views. CLIP embeds both, and a cosine-distance gate compares them with their stored references. The first sampled frame establishes a baseline. Later samples trigger when a region's distance exceeds the threshold.
+2. **Look for previously described context.** On a trigger, the hybrid mode compares the full-frame CLIP image embedding with text embeddings of earlier LLaVA descriptions from the same session.
+3. **Reuse or describe.** A sufficiently strong and unambiguous memory match reuses the prior text. Otherwise, LLaVA describes the **current full frame**, and its eligible response is added to memory.
 
-```powershell
+The gate distinguishes person, background, and combined changes, but these are *visual-change signals*, not verified activity boundaries. The VLM receives a single image, not a video sequence or a before/after pair.
+
+The default change threshold is `0.10`. Memory reuse requires at least two distinct stored descriptions, a best image/text cosine similarity of at least `0.30`, and a margin of at least `0.04` over the next candidate. These values are exploratory defaults, not calibrated confidence levels.
+
+## Run the webcam demo
+
+**The live webcam and semantic-memory implementation currently lives on the [demo branch](https://github.com/artin-saberpour/Event-Triggered-Visual-Reasoning/tree/demo/webcam-task-observations-20261106), not on `main`.** The `main` branch contains the earlier region-routing command-line implementation.
+
+Python 3.10 or 3.11 is recommended. The full demo downloads pretrained CLIP and LLaVA weights on first use; LLaVA 1.5 7B needs substantial GPU memory and disk space. For CUDA, install a compatible PyTorch and torchvision build using the [official PyTorch installation guide](https://pytorch.org/get-started/locally/) before installing the optional model dependencies.
+
+```bash
+git clone https://github.com/artin-saberpour/Event-Triggered-Visual-Reasoning.git
+cd Event-Triggered-Visual-Reasoning
 git switch demo/webcam-task-observations-20261106
+
+python -m venv .venv
+# Activate .venv (Windows PowerShell: .\.venv\Scripts\Activate.ps1;
+# macOS/Linux: source .venv/bin/activate)
+python -m pip install --upgrade pip
+python -m pip install -e ".[models]"
+
 python -m vision_events.task_demo --camera 0 --device auto
 ```
 
-The command-line pipeline on `main` is the earlier region-routing variant described below.
+Use `--camera 1` for another camera. Press **Q** or **Esc** to quit. Press **D** to toggle expanded memory details in the dashboard. The `--device cpu` option is available but VLM inference may be very slow.
 
-## Real-world diagnostic example
+### Useful options
 
-The current implementation was run on four archived camera snapshots of a desk. The first image established a reference; the next three were processed in filename order using MediaPipe and CLIP with a cosine-distance threshold of **0.1**. These are separate still images, captured over several minutes, with changes in viewpoint and exposure. LLaVA was not used in this run.
+```bash
+# Sample frames more frequently (subject to inference throughput)
+python -m vision_events.task_demo --camera 0 --sample-seconds 0.5
 
-| Input frame, sample 2 | Corresponding person-region view |
-| :---: | :---: |
-| ![Real desk image supplied to the pipeline.](examples/desk-diagnostic/002_full.png) | ![The person-region view incorrectly includes a mug and nearby objects.](examples/desk-diagnostic/002_person.png) |
+# Compare with a mode that calls LLaVA at every visual trigger
+python -m vision_events.task_demo --camera 0 --mode vlm
 
-*Unaltered views saved by the capture-report script. The dark region in the person view consists of pixels masked out by the segmentation step.*
+# Save structured event and inference records (choose a new file for each run)
+python -m vision_events.task_demo --camera 0 --log outputs/session-01.jsonl
 
-The person-region view includes a mug and nearby desk objects even though no full person is visible. This segmentation error affects the CLIP embedding and contributes to the selected routes. It is a concrete failure case that motivates checking mask quality before interpreting a region change as a human event.
+# Request a larger camera feed and show the dashboard full screen
+python -m vision_events.task_demo --camera 0 --fullscreen --camera-resolution 1280x720
+```
 
-| Sample | Person distance | Background distance | Full-frame distance | Selected region |
-| --- | ---: | ---: | ---: | --- |
-| 0 | — | — | — | Baseline |
-| 1 | 0.189 | 0.093 | 0.031 | Person |
-| 2 | 0.227 | 0.153 | 0.077 | Full frame |
-| 3 | 0.171 | 0.137 | 0.044 | Full frame |
+The default `hybrid` mode checks memory before asking LLaVA on a trigger. The `vlm` mode bypasses reuse, but **still uses the same visual-change gate**; it is not frame-by-frame VLM inference. The initial baseline is described by LLaVA in both modes.
 
-Distances are computed against each region's stored reference, which is refreshed after a corresponding event; they are not necessarily distances to the immediately preceding image. The threshold is applied to the person and background distances. These four samples demonstrate behavior on this particular input, not measured accuracy, latency, or model-call savings. [Run metadata and unrounded distances](examples/desk-diagnostic/desk_diagnostic.json).
+The optional JSONL log records decisions, scores, timings, and model text; it does not save camera frames. The live preview may temporarily lag while inference is running, and queued frames may be replaced to keep the interface responsive.
 
-## Original region-routing CLI
+## Earlier command-line pipeline
 
-The following pipeline describes the command-line implementation on `main`. Unlike the live demo, it can send the selected region directly to LLaVA.
+The `main` branch provides a simpler version of the region-aware change gate that can process a webcam or recorded video. Unlike the interactive demo, it optionally passes the selected **person**, **background**, or **full-frame** image directly to LLaVA and has no session-memory lookup.
 
-**Frame → person/background segmentation → CLIP embeddings → change gate → selected view → optional LLaVA**
-
-If neither region crosses the change threshold, the gate emits no event.
-
-Each sampled frame is encoded as a full image, a person-only image, and a background-only image. Masked pixels are black. The gate compares each region embedding with its stored reference using cosine distance:
-
-$$
-d_r = 1 - \frac{e_r \cdot e_r^{\mathrm{ref}}}{\lVert e_r \rVert \cdot \lVert e_r^{\mathrm{ref}} \rVert}
-$$
-
-The first sample sets the references. Person and background distances determine the route when they are greater than a threshold; the full-frame distance is reported for context.
-
-| Person changed | Background changed | Selected input |
-| --- | --- | --- |
-| No | No | No event |
-| Yes | No | Person view |
-| No | Yes | Background view |
-| Yes | Yes | Full frame |
-
-After an event, the affected region reference is updated. A full-frame event refreshes both region references, preventing repeated triggers on unchanged inputs. LLaVA is called only if `--vlm` is enabled and an event is selected. It receives the **current selected image**, not a before-and-after pair, so its response does not directly compare frames.
-
-## Try the synthetic demo
-
-The gate and its tests run without downloading models. Python 3.10 or 3.11 is recommended.
-
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+```bash
+# On main, install the lightweight package and run a model-free gate simulation
 python -m pip install -e .
 vision-events --simulate
-python -m unittest discover -s tests -v
-```
 
-On macOS or Linux, activate with `source .venv/bin/activate` instead. Each line of the demo is a JSON record containing the selected region and synthetic distances.
-
-## Create a report from real captures
-
-The optional capture-report script processes a folder of JPG or PNG images in filename order. It saves each original frame, its person and background views, the actual CLIP cosine distances, and the gate's selected region. The resulting `report.html` displays those views beside their corresponding values; `events.jsonl` and `run.json` retain the machine-readable output. The script uses the current implementation and does not run LLaVA.
-
-After installing the model dependencies described below, run:
-
-```powershell
-python scripts\record_captures.py --frames path\to\captures --output outputs\capture-report --device cuda
-```
-
-Choose a new output path for each run. Images and results stay local unless you choose to share them. In addition to automated tests with a fake model, the capture-report path was run on four real desk images; one sample is shown above.
-
-## Try a camera or video
-
-For CUDA, first install compatible PyTorch and torchvision builds using the [official PyTorch selector](https://pytorch.org/get-started/locally/), then install the optional dependencies:
-
-```powershell
+# Install model dependencies to process a camera or local video
 python -m pip install -e ".[models]"
-vision-events --source 0 --device cuda --every 30 --max-samples 100
+vision-events --source 0 --device auto --every 30 --max-samples 100
+
+# Add --vlm to describe triggered regions
+vision-events --source 0 --device auto --every 30 --max-samples 100 --vlm
 ```
 
-Use a local video path instead of `0` to process a recording. `--every 30` analyzes every 30th frame; it is not a fixed wall-clock interval. Each analyzed sample produces a JSON record. Omit `--max-samples` for an unlimited run and stop with Ctrl+C. Use `--device cpu` if CUDA is unavailable.
+For a recording, replace `0` with its local file path. The `--every` argument samples every *N*th frame, not every *N* seconds. The project also contains a capture-report utility and automated gate tests; those are supporting tools rather than the focus of the interactive demonstration.
 
-To generate descriptions for selected images, add `--vlm`:
+## Current scope
 
-```powershell
-vision-events --source 0 --device cuda --every 30 --max-samples 100 --vlm --question "Describe what is visible in this image."
-```
+This is a **research prototype**, not a validated action-recognition or tracking system.
 
-The first run downloads the required weights. CLIP uses a [pinned Hugging Face conversion-bot revision](https://huggingface.co/openai/clip-vit-base-patch32/commit/aa8b329a670ccfc2a5170d7391ac3fca2e88595f) containing `safetensors` weights. This is an unmerged conversion of the original model; it avoids loading the default branch's legacy PyTorch `.bin` checkpoint. The optional 7B LLaVA model requires substantial memory and disk space. The default cosine-distance threshold is `0.1`; tune it with `--threshold` for the scene and task. The camera/video command does not save frames by default.
+- The change gate uses CLIP embedding distances; lighting, viewpoint changes, occlusion, and segmentation errors can cause false triggers or missed changes.
+- Cached descriptions are previous VLM outputs, not verified labels. A semantically similar new scene can receive the wrong earlier description.
+- LLaVA describes a single frame. It cannot establish an action's intent, infer speech, or verify that an activity was completed.
+- The webcam video is a qualitative demonstration. Controlled measurements of missed events, response latency, recognition accuracy, and VLM-call savings have **not** yet been reported.
 
-## Scope and validation
+A useful next evaluation is to replay the same recordings through the hybrid and VLM-only modes, then compare output quality, missed context changes, response delay, and VLM calls.
 
-- **What has been checked:** the model-independent gate is tested with synthetic vectors, including separate and simultaneous changes and reference updates. The capture-report path was also run with real MediaPipe and CLIP models on four desk snapshots.
-- **Live demo:** the video above shows an exploratory webcam run with LLaVA descriptions. It is a qualitative example; latency, model-call reduction, missed events and accuracy have not been measured in a controlled evaluation.
-- **Research context:** this is an AI-assisted reconstruction and refactoring of exploratory scripts, separate from the final method of the associated paper. Thresholds, segmentation quality, lighting, occlusion, and VLM errors can affect the behavior.
+## Components and credits
 
-A useful next evaluation would compare event-triggered routing with regular inference on the same recorded scenes, measuring missed events, response delay, and model calls. [See the project overview](https://artin-saberpour.github.io/projects/event-triggered-vision/).
+This implementation uses pretrained third-party models and libraries:
 
-## Models and acknowledgments
+- [MediaPipe Selfie Segmentation](https://github.com/google-ai-edge/mediapipe) for person/background masks
+- [CLIP](https://github.com/openai/CLIP) using [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32) for image/text embeddings
+- [LLaVA 1.5 7B](https://huggingface.co/llava-hf/llava-1.5-7b-hf) for open-ended descriptions
+- [Hugging Face Transformers](https://huggingface.co/docs/transformers/) for model interfaces
 
-This project uses pretrained third-party components: [MediaPipe Selfie Segmentation](https://github.com/google-ai-edge/mediapipe), [CLIP](https://github.com/openai/CLIP) via [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32), and optional [LLaVA](https://github.com/haotian-liu/LLaVA) via [`llava-hf/llava-1.5-7b-hf`](https://huggingface.co/llava-hf/llava-1.5-7b-hf). Model interfaces use [Hugging Face Transformers](https://huggingface.co/docs/transformers/). Review upstream code, model, and data licenses before reuse.
+Check upstream model and software licenses before redistribution or reuse.
+
+[Project overview](https://artin-saberpour.github.io/projects/event-triggered-vision/)
